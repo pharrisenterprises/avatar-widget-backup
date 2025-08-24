@@ -3,34 +3,26 @@
 import React, {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
-  useMemo,
 } from 'react';
 import { loadHeygenSdk } from '../lib/loadHeygenSdk';
 
 const LS_CHAT_KEY = 'retell_chat_id';
-
-// tiny helper
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-// simple duplicate guard
 function makeDupeGuard(windowMs = 2500) {
   const last = { text: '', ts: 0 };
   return (t) => {
     const now = Date.now();
     const s = (t || '').trim();
     const dupe = s && s === last.text && now - last.ts < windowMs;
-    if (!dupe) {
-      last.text = s;
-      last.ts = now;
-    }
+    if (!dupe) { last.text = s; last.ts = now; }
     return dupe;
   };
 }
 
-export default function AvatarWidget({
-  // optional props
+export default function FloatingAvatarWidget({
   defaultOpen = false,
   defaultShowChat = true,
   quality = 'medium', // 'low' | 'medium' | 'high'
@@ -44,18 +36,17 @@ export default function AvatarWidget({
     []
   );
 
-  // video + audio state
+  // video/audio
   const videoRef = useRef(null);
   const playPromiseRef = useRef(null);
   const [muted, setMuted] = useState(false);
   const [status, setStatus] = useState('idle'); // idle | connecting | ready | reconnecting | error
   const [uiMsg, setUiMsg] = useState('');
 
-  // avatar + lifecycle
+  // avatar lifecycle
   const avatarRef = useRef(null);
   const startLockRef = useRef(false);
   const stopOnceRef = useRef(false);
-  const startCountRef = useRef(0);
 
   // speak queue
   const speakQueueRef = useRef([]);
@@ -73,7 +64,7 @@ export default function AvatarWidget({
   const guardAssistant = useRef(makeDupeGuard(2500));
   const [chatId, setChatId] = useState('');
 
-  // -------- Retell helpers ----------
+  // ---------- Retell helpers ----------
   const friendlyFail = (code) =>
     code ? `Message failed (${code}). Please try again.` : 'Message failed. Please try again.';
 
@@ -87,10 +78,7 @@ export default function AvatarWidget({
       if (!forceNew) {
         try {
           const s = localStorage.getItem(LS_CHAT_KEY);
-          if (s) {
-            setChatId(s);
-            return s;
-          }
+          if (s) { setChatId(s); return s; }
         } catch {}
       }
       const r = await fetch('/api/retell-chat/start', { cache: 'no-store' });
@@ -101,9 +89,7 @@ export default function AvatarWidget({
         throw err;
       }
       setChatId(j.chatId);
-      try {
-        localStorage.setItem(LS_CHAT_KEY, j.chatId);
-      } catch {}
+      try { localStorage.setItem(LS_CHAT_KEY, j.chatId); } catch {}
       return j.chatId;
     },
     [chatId]
@@ -140,9 +126,7 @@ export default function AvatarWidget({
           );
         if (maybeExpired) {
           const fresh = await ensureChat(true);
-          try {
-            localStorage.setItem(LS_CHAT_KEY, fresh);
-          } catch {}
+          try { localStorage.setItem(LS_CHAT_KEY, fresh); } catch {}
           return await sendOnce(fresh, text);
         }
         throw err;
@@ -151,33 +135,22 @@ export default function AvatarWidget({
     [ensureChat, sendOnce]
   );
 
-  // -------- Avatar helpers ----------
+  // ---------- Avatar helpers ----------
   const stopAvatar = useCallback(async () => {
     if (stopOnceRef.current) return;
     stopOnceRef.current = true;
-    try {
-      const a = avatarRef.current;
-      if (a?.stopAvatar) await a.stopAvatar(); // ignore 401s
-    } catch {}
+    try { const a = avatarRef.current; if (a?.stopAvatar) await a.stopAvatar(); } catch {}
     avatarRef.current = null;
     const v = videoRef.current;
-    if (v) {
-      try { v.pause?.(); } catch {}
-      v.srcObject = null;
-    }
+    if (v) { try { v.pause?.(); } catch {}; v.srcObject = null; }
   }, []);
 
   const speak = useCallback(async (text) => {
     if (!text) return;
     const sdk = await loadHeygenSdk();
     const a = avatarRef.current;
+    if (!sdk || !a) { speakQueueRef.current.push(text); return; }
 
-    if (!sdk || !a) {
-      speakQueueRef.current.push(text);
-      return;
-    }
-
-    // unmute just-in-time (avoids autoplay issues)
     const v = videoRef.current;
     if (v) {
       try {
@@ -195,12 +168,8 @@ export default function AvatarWidget({
       ? { text, taskType: sdk.TaskType.REPEAT }
       : { text, taskType: 'REPEAT' };
 
-    try {
-      await a.speak(payload);
-    } catch {
-      // requeue once on hiccup
-      speakQueueRef.current.push(text);
-    }
+    try { await a.speak(payload); }
+    catch { speakQueueRef.current.push(text); }
   }, []);
 
   const flushSpeakQueue = useCallback(async () => {
@@ -213,114 +182,100 @@ export default function AvatarWidget({
     flushingRef.current = false;
   }, [speak]);
 
-  const beginAvatar = useCallback(
-    async () => {
-      // serialize starts
-      if (startLockRef.current) return;
-      startLockRef.current = true;
-      stopOnceRef.current = false;
+  const beginAvatar = useCallback(async () => {
+    if (startLockRef.current) return;
+    startLockRef.current = true;
+    stopOnceRef.current = false;
 
-      let attempt = 0;
-      const maxAttempts = 5;
+    let attempt = 0;
+    const maxAttempts = 5;
 
-      while (attempt < maxAttempts) {
-        attempt += 1;
-        startCountRef.current += 1;
-        const startNum = startCountRef.current;
+    while (attempt < maxAttempts) {
+      attempt += 1;
+      setStatus(attempt === 1 ? 'connecting' : 'reconnecting');
+      setUiMsg(attempt === 1 ? 'Connecting…' : 'Reconnecting…');
 
-        setStatus(attempt === 1 ? 'connecting' : 'reconnecting');
-        setUiMsg(attempt === 1 ? 'Connecting…' : 'Reconnecting…');
+      try {
+        const tr = await fetch('/api/heygen-token', { cache: 'no-store' });
+        const tj = await tr.json().catch(() => ({}));
+        const token = tj?.token || tj?.data?.token || tj?.accessToken || '';
+        if (!token) throw new Error('TOKEN_MISSING');
 
-        try {
-          // fresh token each attempt
-          const tr = await fetch('/api/heygen-token', { cache: 'no-store' });
-          const tj = await tr.json().catch(() => ({}));
-          const token = tj?.token || tj?.data?.token || tj?.accessToken || '';
-          if (!token) throw new Error('TOKEN_MISSING');
+        const sdk = await loadHeygenSdk();
+        if (!sdk?.StreamingAvatar) throw new Error('SDK_LOAD_FAILED');
 
-          const sdk = await loadHeygenSdk();
-          if (!sdk?.StreamingAvatar) throw new Error('SDK_LOAD_FAILED');
+        const { StreamingAvatar, AvatarQuality, StreamingEvents } = sdk;
+        const avatar = new StreamingAvatar({ token, debug: false });
+        avatarRef.current = avatar;
 
-          const { StreamingAvatar, AvatarQuality, StreamingEvents } = sdk;
-          const avatar = new StreamingAvatar({ token, debug: false });
-          avatarRef.current = avatar;
+        const onReady = (evt) => {
+          const stream = evt?.detail;
+          const v = videoRef.current;
+          if (v && stream instanceof MediaStream) {
+            v.srcObject = stream;
+            v.muted = true;
+            (async () => {
+              try {
+                if (!playPromiseRef.current) {
+                  playPromiseRef.current = v.play().catch(() => {});
+                  await playPromiseRef.current;
+                  playPromiseRef.current = null;
+                }
+              } catch {}
+              setMuted(true);
+              setStatus('ready');
+              setUiMsg('');
+              flushSpeakQueue();
+            })();
+          }
+        };
 
-          const onReady = (evt) => {
-            const stream = evt?.detail;
-            const v = videoRef.current;
-            if (v && stream instanceof MediaStream) {
-              v.srcObject = stream;
-              v.muted = true; // pass autoplay
-              (async () => {
-                try {
-                  if (!playPromiseRef.current) {
-                    playPromiseRef.current = v.play().catch(() => {});
-                    await playPromiseRef.current;
-                    playPromiseRef.current = null;
-                  }
-                } catch {}
-                setMuted(true);
-                setStatus('ready');
-                setUiMsg('');
-                flushSpeakQueue();
-              })();
-            }
-          };
+        const onDisconnected = async () => {
+          try { avatar.off(StreamingEvents.STREAM_READY, onReady); } catch {}
+          try { avatar.off(StreamingEvents.STREAM_DISCONNECTED, onDisconnected); } catch {}
+          await stopAvatar();
+          throw new Error('DISCONNECTED');
+        };
 
-          const onDisconnected = async () => {
-            // let the loop retry
-            try { avatar.off(StreamingEvents.STREAM_READY, onReady); } catch {}
-            try { avatar.off(StreamingEvents.STREAM_DISCONNECTED, onDisconnected); } catch {}
-            await stopAvatar();
-            throw new Error('DISCONNECTED');
-          };
+        avatar.on(StreamingEvents.STREAM_READY, onReady);
+        avatar.on(StreamingEvents.STREAM_DISCONNECTED, onDisconnected);
 
-          avatar.on(StreamingEvents.STREAM_READY, onReady);
-          avatar.on(StreamingEvents.STREAM_DISCONNECTED, onDisconnected);
+        const qmap = {
+          low: sdk.AvatarQuality?.Low || 'low',
+          medium: sdk.AvatarQuality?.Medium || 'medium',
+          high: sdk.AvatarQuality?.High || 'high',
+        };
 
-          // quality map
-          const qmap = {
-            low: AvatarQuality?.Low || 'low',
-            medium: AvatarQuality?.Medium || 'medium',
-            high: AvatarQuality?.High || 'high',
-          };
+        await avatar.createStartAvatar({
+          avatarName: avatarId,
+          quality: qmap[quality] || qmap.medium,
+          welcomeMessage: '',
+        });
 
-          await avatar.createStartAvatar({
-            avatarName: avatarId,
-            quality: qmap[quality] || qmap.medium,
-            welcomeMessage: '',
-          });
+        const readyCheck = (async () => {
+          await sleep(10000);
+          if (status !== 'ready') throw new Error('NOT_READY_TIMEOUT');
+        })();
 
-          // safety: if not ready in 10s, force retry
-          const readyCheck = (async () => {
-            await sleep(10000);
-            if (status !== 'ready') throw new Error('NOT_READY_TIMEOUT');
-          })();
-
-          await readyCheck;
-          // success
-          startLockRef.current = false;
-          return;
-        } catch (err) {
-          // backoff (handles 429/WS early closes/etc.)
-          const base = 600 * Math.pow(2, attempt - 1);
-          const jitter = Math.floor(Math.random() * 300);
-          const wait = Math.min(6000, base + jitter);
-          // quiet vendor message
-          setUiMsg('Reconnecting…');
-          await sleep(wait);
-          continue;
-        }
+        await readyCheck;
+        startLockRef.current = false;
+        return;
+      } catch {
+        const base = 600 * Math.pow(2, attempt - 1);
+        const jitter = Math.floor(Math.random() * 300);
+        const wait = Math.min(6000, base + jitter);
+        setUiMsg('Reconnecting…');
+        await sleep(wait);
+        continue;
       }
+    }
 
-      setStatus('error');
-      setUiMsg('Network unstable. Please try again.');
-      startLockRef.current = false;
-    },
-    [avatarId, quality, flushSpeakQueue, stopAvatar, status]
-  );
+    setStatus('error');
+    setUiMsg('Network unstable. Please try again.');
+    startLockRef.current = false;
+  }, [avatarId, flushSpeakQueue, quality, status, stopAvatar]);
 
-  // -------- Mic (Web Speech) ----------
+  // ---------- Mic (Web Speech) ----------
   const stopMic = useCallback(() => {
     micWantedRef.current = false;
     micActiveRef.current = false;
@@ -335,19 +290,11 @@ export default function AvatarWidget({
     const SR =
       typeof window !== 'undefined' &&
       (window.SpeechRecognition || window.webkitSpeechRecognition);
-    if (!SR) {
-      setMicState('unsupported');
-      return;
-    }
+    if (!SR) { setMicState('unsupported'); return; }
 
-    // prime permission quickly
     try {
       const gum = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       });
       try { gum.getTracks().forEach((t) => t.stop()); } catch {}
     } catch {
@@ -381,7 +328,6 @@ export default function AvatarWidget({
         pushMsg('system', friendlyFail(Number(err?.status || 0)));
       }
     };
-
     rec.onend = () => {
       if (micWantedRef.current && micSessionIdRef.current === mySession) {
         try { rec.start(); } catch {}
@@ -403,18 +349,16 @@ export default function AvatarWidget({
     }
   }, [pushMsg, sendWithRetry, speak]);
 
-  // -------- Open / Close behaviors ----------
+  // ---------- Open / Close ----------
   const openWidget = useCallback(async () => {
     setIsOpen(true);
-    // gesture-time audio priming to beat autoplay gates
+    // treat button click as user gesture: resume AudioContext
     try {
       const ac = new (window.AudioContext || window.webkitAudioContext)();
       await ac.resume();
       ac.close?.();
     } catch {}
-    // kick everything off
-    setStatus('connecting');
-    setUiMsg('Connecting…');
+    setStatus('connecting'); setUiMsg('Connecting…');
     await beginAvatar();
     await ensureChat(false);
     await startMic();
@@ -430,7 +374,7 @@ export default function AvatarWidget({
     setUiMsg('');
   }, [stopAvatar, stopMic]);
 
-  // -------- Manual actions ----------
+  // ---------- Manual actions ----------
   const toggleMute = useCallback(async () => {
     const v = videoRef.current;
     if (!v) return;
@@ -465,44 +409,30 @@ export default function AvatarWidget({
     }
   }, [input, pushMsg, sendWithRetry, speak]);
 
-  // -------- Cleanup on unmount ----------
-  useEffect(() => {
-    return () => { stopAvatar(); stopMic(); };
-  }, [stopAvatar, stopMic]);
+  // cleanup
+  useEffect(() => () => { stopAvatar(); stopMic(); }, [stopAvatar, stopMic]);
 
-  // -------- UI ----------
-  // container sizing
+  // UI sizing
   const baseW = isFullscreen ? 'min(100vw, 1200px)' : 'min(92vw, 720px)';
   const baseH = isFullscreen ? 'min(100vh, 720px)' : 'min(70vh, 520px)';
 
   return (
     <>
-      {/* Floating launcher button */}
       {!isOpen && (
         <button
           onClick={openWidget}
           aria-label="Open assistant"
           style={{
-            position: 'fixed',
-            right: 18,
-            bottom: 18,
-            width: 56,
-            height: 56,
-            borderRadius: 999,
-            border: 'none',
-            boxShadow: '0 8px 24px rgba(0,0,0,0.35)',
-            background: '#0ea5e9',
-            color: '#fff',
-            fontSize: 22,
-            cursor: 'pointer',
-            zIndex: 1000,
+            position: 'fixed', right: 18, bottom: 18,
+            width: 56, height: 56, borderRadius: 999, border: 'none',
+            boxShadow: '0 8px 24px rgba(0,0,0,0.35)', background: '#0ea5e9',
+            color: '#fff', fontSize: 22, cursor: 'pointer', zIndex: 1000,
           }}
         >
           ✨
         </button>
       )}
 
-      {/* Main panel */}
       {isOpen && (
         <div
           style={{
@@ -510,96 +440,56 @@ export default function AvatarWidget({
             right: isFullscreen ? '50%' : 18,
             bottom: isFullscreen ? '50%' : 18,
             transform: isFullscreen ? 'translate(50%, 50%)' : 'none',
-            width: baseW,
-            height: baseH,
-            borderRadius: isFullscreen ? 0 : 16,
-            overflow: 'hidden',
-            background: '#0f0f10',
-            border: '1px solid #1f242c',
+            width: baseW, height: baseH,
+            borderRadius: isFullscreen ? 0 : 16, overflow: 'hidden',
+            background: '#0f0f10', border: '1px solid #1f242c',
             boxShadow: '0 18px 60px rgba(0,0,0,0.45)',
             display: 'grid',
             gridTemplateColumns: showChat ? '1fr 340px' : '1fr',
             zIndex: 1000,
           }}
         >
-          {/* Video area */}
+          {/* Video */}
           <div style={{ position: 'relative', background: '#000' }}>
             <video
               ref={videoRef}
               playsInline
               autoPlay
               muted={muted}
-              style={{
-                width: '100%',
-                height: '100%',
-                objectFit: 'cover',
-                background: '#000',
-              }}
+              style={{ width: '100%', height: '100%', objectFit: 'cover', background: '#000' }}
             />
 
             {/* Controls */}
-            <div
-              style={{
-                position: 'absolute',
-                top: 8,
-                right: 8,
-                display: 'flex',
-                gap: 8,
-                zIndex: 2,
-              }}
-            >
-              <button
-                onClick={() => setIsFullscreen((v) => !v)}
-                title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
-                style={btn()}
-              >
-                {isFullscreen ? '🗗' : '🗖'}
-              </button>
-              <button onClick={toggleMute} title={muted ? 'Unmute' : 'Mute'} style={btn()}>
-                {muted ? '🔈' : '🔊'}
-              </button>
-              <button
-                onClick={() => setShowChat((v) => !v)}
-                title={showChat ? 'Hide chat' : 'Show chat'}
-                style={btn()}
-              >
-                💬
-              </button>
+            <div style={{ position: 'absolute', top: 8, right: 8, display: 'flex', gap: 8, zIndex: 2 }}>
+              <button onClick={() => setIsFullscreen((v) => !v)} title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'} style={btn()}>🗖</button>
+              <button onClick={toggleMute} title={muted ? 'Unmute' : 'Mute'} style={btn()}>{muted ? '🔈' : '🔊'}</button>
+              <button onClick={() => setShowChat((v) => !v)} title={showChat ? 'Hide chat' : 'Show chat'} style={btn()}>💬</button>
               <button onClick={closeWidget} title="Close" style={btn()}>✕</button>
             </div>
 
             {/* Mic chip */}
-            <div style={{ position: 'absolute', left: 10, bottom: 10, zIndex: 2, display: 'flex', gap: 8 }}>
-              <span
-                style={{
-                  background: 'rgba(0,0,0,0.55)',
-                  color: '#fff',
-                  fontSize: 12,
-                  padding: '6px 10px',
-                  borderRadius: 999,
-                }}
-              >
-                {micState === 'on' ? '🎙️ Mic on' :
-                 micState === 'blocked' ? 'Tap browser “Allow mic”' :
-                 micState === 'unsupported' ? 'Voice not supported' :
-                 micState === 'starting' ? 'Mic starting…' : 'Mic off'}
+            <div style={{ position: 'absolute', left: 10, bottom: 10, zIndex: 2 }}>
+              <span style={{ background: 'rgba(0,0,0,0.55)', color: '#fff', fontSize: 12, padding: '6px 10px', borderRadius: 999 }}>
+                {micState === 'on' ? '🎙️ Mic on'
+                  : micState === 'blocked' ? 'Tap “Allow mic”'
+                  : micState === 'unsupported' ? 'Voice not supported'
+                  : micState === 'starting' ? 'Mic starting…'
+                  : 'Mic off'}
               </span>
             </div>
 
             {/* Status overlay */}
             {status !== 'ready' && (
-              <div
-                style={{
-                  position: 'absolute', inset: 0, display: 'grid', placeItems: 'center',
-                  color: '#fff', background: 'rgba(0,0,0,0.35)', fontWeight: 700,
-                }}
-              >
+              <div style={{
+                position: 'absolute', inset: 0, display: 'grid', placeItems: 'center',
+                color: '#fff', background: 'rgba(0,0,0,0.35)', fontWeight: 700,
+              }}>
                 {uiMsg || 'Connecting…'}
               </div>
             )}
           </div>
 
-          {/* Chat column */}
+          {/* Chat */}
           {showChat && (
             <div
               role="region"
@@ -618,18 +508,10 @@ export default function AvatarWidget({
                 ) : (
                   messages.map((m, i) => (
                     <div key={i} style={{ marginBottom: 10 }}>
-                      <div
-                        style={{
-                          fontWeight: 700,
-                          fontSize: 12,
-                          color:
-                            m.role === 'user'
-                              ? '#60a5fa'
-                              : m.role === 'assistant'
-                              ? '#34d399'
-                              : '#e879f9',
-                        }}
-                      >
+                      <div style={{
+                        fontWeight: 700, fontSize: 12,
+                        color: m.role === 'user' ? '#60a5fa' : m.role === 'assistant' ? '#34d399' : '#e879f9',
+                      }}>
                         {m.role === 'assistant' ? 'Assistant' : m.role[0].toUpperCase() + m.role.slice(1)}
                       </div>
                       <div style={{ whiteSpace: 'pre-wrap' }}>{m.text}</div>
@@ -643,25 +525,16 @@ export default function AvatarWidget({
                   onChange={(e) => setInput(e.target.value)}
                   placeholder="Type your message…"
                   style={{
-                    flex: 1,
-                    borderRadius: 10,
-                    border: '1px solid #2a2a30',
-                    background: '#15151a',
-                    color: '#eaeaea',
-                    padding: '10px 12px',
-                    outline: 'none',
+                    flex: 1, borderRadius: 10, border: '1px solid #2a2a30',
+                    background: '#15151a', color: '#eaeaea', padding: '10px 12px', outline: 'none',
                   }}
                 />
                 <button
                   type="submit"
                   disabled={!input.trim()}
                   style={{
-                    padding: '10px 14px',
-                    borderRadius: 10,
-                    border: '1px solid #2563eb',
-                    background: '#2563eb',
-                    color: '#fff',
-                    fontWeight: 700,
+                    padding: '10px 14px', borderRadius: 10,
+                    border: '1px solid #2563eb', background: '#2563eb', color: '#fff', fontWeight: 700,
                     cursor: input.trim() ? 'pointer' : 'default',
                   }}
                 >
