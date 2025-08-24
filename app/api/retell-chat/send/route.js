@@ -5,7 +5,10 @@ export const revalidate = 0;
 export async function POST(req) {
   const apiKey = process.env.RETELL_API_KEY;
   if (!apiKey) {
-    return Response.json({ ok: false, status: 500, error: 'CONFIG' }, { headers: { 'Cache-Control': 'no-store' } });
+    return Response.json(
+      { ok: false, status: 500, error: 'CONFIG' },
+      { headers: { 'Cache-Control': 'no-store' } }
+    );
   }
 
   const body = await req.json().catch(() => ({}));
@@ -13,7 +16,10 @@ export async function POST(req) {
   const text = (body?.text || '').toString();
 
   if (!chatId || !text) {
-    return Response.json({ ok: false, status: 400, error: 'BAD_INPUT' }, { headers: { 'Cache-Control': 'no-store' } });
+    return Response.json(
+      { ok: false, status: 400, error: 'BAD_INPUT' },
+      { headers: { 'Cache-Control': 'no-store' } }
+    );
   }
 
   try {
@@ -28,15 +34,22 @@ export async function POST(req) {
     });
 
     const j = await r.json().catch(() => ({}));
-
     if (!r.ok) {
-      return Response.json({ ok: false, status: r.status, error: j }, { headers: { 'Cache-Control': 'no-store' } });
+      return Response.json(
+        { ok: false, status: r.status, error: j },
+        { headers: { 'Cache-Control': 'no-store' } }
+      );
     }
 
-    // Retell returns { messages: [{ role, content }, ...] }
     const reply = j?.messages?.[0]?.content || '';
-    return Response.json({ ok: true, reply }, { headers: { 'Cache-Control': 'no-store' } });
+    return Response.json(
+      { ok: true, reply },
+      { headers: { 'Cache-Control': 'no-store' } }
+    );
   } catch {
-    return Response.json({ ok: false, status: 500, error: 'NETWORK' }, { headers: { 'Cache-Control': 'no-store' } });
+    return Response.json(
+      { ok: false, status: 500, error: 'NETWORK' },
+      { headers: { 'Cache-Control': 'no-store' } }
+    );
   }
 }
