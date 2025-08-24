@@ -1,17 +1,15 @@
-export const dynamic = 'force-dynamic';
-export const revalidate = 0;
+// app/layout.jsx
+import './globals.css';
 
-import './globals.css'; // keep if you have it
-import FloatingAvatarWidget from './components/FloatingAvatarWidget';
+export const metadata = {
+  title: 'Avatar Widget',
+  description: 'Embeddable avatar + chat',
+};
 
 export default function RootLayout({ children }) {
   return (
     <html lang="en">
-      <body>
-        {children}
-        {/* D-ID–style floating assistant available everywhere */}
-        <FloatingAvatarWidget defaultOpen={false} defaultShowChat={true} quality="low" />
-      </body>
+      <body style={{ margin: 0 }}>{children}</body>
     </html>
   );
 }
