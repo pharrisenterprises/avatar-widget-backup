@@ -1,62 +1,54 @@
 // app/api/retell-chat/start/route.js
-export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+export const revalidate = 0;
 
 export async function GET() {
+  const apiKey = process.env.RETELL_API_KEY;
+  const agentId = process.env.RETELL_CHAT_AGENT_ID;
+
+  if (!apiKey || !agentId) {
+    return Response.json(
+      { ok: false, status: 500, error: 'CONFIG' },
+      { headers: { 'Cache-Control': 'no-store' } },
+    );
+  }
+
   try {
-    const apiKey =
-      process.env.RETELL_API_KEY ||
-      process.env.NEXT_PUBLIC_RETELL_API_KEY ||
-      '';
-    const agentId =
-      process.env.RETELL_CHAT_AGENT_ID ||
-      process.env.RETELL_AGENT_ID ||
-      process.env.NEXT_PUBLIC_RETELL_AGENT_ID ||
-      '';
-
-    if (!apiKey || !agentId) {
-      return new Response(
-        JSON.stringify({
-          ok: false,
-          error: 'Missing RETELL_API_KEY or RETELL_CHAT_AGENT_ID',
-        }),
-        { status: 500, headers: { 'Content-Type': 'application/json' } }
-      );
-    }
-
-    // Correct Chat endpoint (no /v2 prefix)
-    const r = await fetch('https://api.retellai.com/create-chat', {
+    // NOTE: Keep your original endpoint if different; just avoid importing client libs here.
+    const r = await fetch('https://api.retellai.com/v2/chat/start', {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ agent_id: agentId }),
       cache: 'no-store',
+      body: JSON.stringify({ agent_id: agentId }),
     });
 
-    const text = await r.text();
-    let j = {};
-    try { j = text ? JSON.parse(text) : {}; } catch {}
-
+    const j = await r.json().catch(() => ({}));
     if (!r.ok) {
-      return new Response(
-        JSON.stringify({ ok: false, status: r.status, body: j }),
-        { status: r.status, headers: { 'Content-Type': 'application/json' } }
+      return Response.json(
+        { ok: false, status: r.status, error: j },
+        { headers: { 'Cache-Control': 'no-store' } },
       );
     }
 
-    const chatId =
-      j?.chat_id || j?.id || j?.data?.chat_id || j?.data?.id || null;
+    const chatId = j?.chat_id || j?.id;
+    if (!chatId) {
+      return Response.json(
+        { ok: false, status: 502, error: 'NO_CHAT_ID' },
+        { headers: { 'Cache-Control': 'no-store' } },
+      );
+    }
 
-    return new Response(
-      JSON.stringify({ ok: true, chatId, raw: j }),
-      { status: 200, headers: { 'Content-Type': 'application/json' } }
+    return Response.json(
+      { ok: true, chatId },
+      { headers: { 'Cache-Control': 'no-store' } },
     );
-  } catch (e) {
-    return new Response(
-      JSON.stringify({ ok: false, error: e?.message || 'start failed' }),
-      { status: 500, headers: { 'Content-Type': 'application/json' } }
+  } catch {
+    return Response.json(
+      { ok: false, status: 500, error: 'NETWORK' },
+      { headers: { 'Cache-Control': 'no-store' } },
     );
   }
 }
