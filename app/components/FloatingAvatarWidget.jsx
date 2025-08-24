@@ -1,308 +1,213 @@
 'use client';
 
-import React, {
-  useCallback, useEffect, useMemo, useRef, useState,
-} from 'react';
-import { loadHeygenSdk } from '../lib/loadHeygenSdk';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { loadHeygenSdk } from '@/app/lib/loadHeygenSdk';
 
-const LS_CHAT_KEY = 'retell_chat_id';
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-function makeDupeGuard(windowMs = 2500) {
-  const last = { text: '', ts: 0 };
-  return (t) => {
+const AVATAR_NAME = process.env.NEXT_PUBLIC_HEYGEN_AVATAR_ID || '';
+const MAX_RETRIES = 4;
+
+function useDupeGuard(ms = 2500) {
+  const last = useRef({ t: '', ts: 0 });
+  return useCallback((s) => {
+    const text = (s || '').trim();
     const now = Date.now();
-    const s = (t || '').trim();
-    const dupe = s && s === last.text && now - last.ts < windowMs;
-    if (!dupe) { last.text = s; last.ts = now; }
+    const dupe = text && text === last.current.t && now - last.current.ts < ms;
+    if (!dupe) last.current = { t: text, ts: now };
     return dupe;
-  };
+  }, [ms]);
 }
 
-export default function FloatingAvatarWidget({
-  defaultOpen = false,
-  defaultShowChat = false,   // ◀ chat hidden until 💬
-  showLauncher = true,       // ◀ hide the ✨ button when embedding on /embed
-  quality = 'low',           // 'low' | 'medium' | 'high'
-}) {
-  const [isOpen, setIsOpen] = useState(defaultOpen);
-  const [isFullscreen, setIsFullscreen] = useState(false);
-  const [showChat, setShowChat] = useState(defaultShowChat);
-
-  const avatarId = useMemo(
-    () => process.env.NEXT_PUBLIC_HEYGEN_AVATAR_ID || '',
-    []
-  );
-
-  // video/audio
-  const videoRef = useRef(null);
-  const playPromiseRef = useRef(null);
-  const [muted, setMuted] = useState(false);
+export default function FloatingAvatarWidget() {
+  // UI state
+  const [open, setOpen] = useState(false);
+  const [showChat, setShowChat] = useState(false);
+  const [muted, setMuted] = useState(true);
   const [status, setStatus] = useState('idle'); // idle | connecting | ready | reconnecting | error
-  const [uiMsg, setUiMsg] = useState('');
-
-  // avatar lifecycle
-  const avatarRef = useRef(null);
-  const startLockRef = useRef(false);
-  const stopOnceRef = useRef(false);
-
-  // speak queue
-  const speakQueueRef = useRef([]);
-  const flushingRef = useRef(false);
-
-  // chat + mic
-  const [messages, setMessages] = useState([]);
+  const [hint, setHint] = useState(''); // vendor-agnostic error/status lines
+  const [messages, setMessages] = useState([]); // {role,text}
   const [input, setInput] = useState('');
-  const [micState, setMicState] = useState('off'); // off | starting | on | blocked | unsupported
+
+  // Refs
+  const videoRef = useRef(null);
+  const avatarRef = useRef(null);
+  const startLockRef = useRef(null); // serialize createStartAvatar
+  const retriesRef = useRef(0);
+  const destroyRef = useRef(false);
+  const hadGestureRef = useRef(false);
+
+  // Mic & SR
   const micWantedRef = useRef(false);
   const micActiveRef = useRef(false);
   const recogRef = useRef(null);
   const micSessionIdRef = useRef(0);
-  const guardUser = useRef(makeDupeGuard(2500));
-  const guardAssistant = useRef(makeDupeGuard(2500));
-  const [chatId, setChatId] = useState('');
 
-  // ---------- Retell helpers ----------
-  const friendlyFail = (code) =>
-    code ? `Message failed (${code}). Please try again.` : 'Message failed. Please try again.';
+  // Chat
+  const guardUser = useDupeGuard(2500);
+  const guardAssistant = useDupeGuard(2500);
 
-  const pushMsg = useCallback((role, text) => {
+  const push = useCallback((role, text) => {
     setMessages((p) => [...p, { role, text }]);
   }, []);
 
-  const ensureChat = useCallback(
-    async (forceNew = false) => {
-      if (!forceNew && chatId) return chatId;
-      if (!forceNew) {
-        try {
-          const s = localStorage.getItem(LS_CHAT_KEY);
-          if (s) { setChatId(s); return s; }
-        } catch {}
-      }
-      const r = await fetch('/api/retell-chat/start', { cache: 'no-store' });
-      const j = await r.json().catch(() => ({}));
-      if (!r.ok || !j?.ok || !j?.chatId) {
-        const err = new Error('CHAT_START_FAILED');
-        err.status = r.status || j?.status;
-        throw err;
-      }
-      setChatId(j.chatId);
-      try { localStorage.setItem(LS_CHAT_KEY, j.chatId); } catch {}
-      return j.chatId;
-    },
-    [chatId]
-  );
+  // ======== RETELL HELPERS (uses your existing API routes) ========
+  const ensureChat = useCallback(async () => {
+    // try to resume prior chat
+    try {
+      const s = window.localStorage.getItem('retell_chat_id');
+      if (s) return s;
+    } catch {}
+    const r = await fetch('/api/retell-chat/start', { cache: 'no-store' });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j?.ok || !j?.chatId) {
+      const e = new Error('CHAT_START_FAILED');
+      e.status = r.status || j?.status;
+      e.detail = j;
+      throw e;
+    }
+    try { window.localStorage.setItem('retell_chat_id', j.chatId); } catch {}
+    return j.chatId;
+  }, []);
 
-  const sendOnce = useCallback(async (id, text) => {
+  const sendToAgent = useCallback(async (text) => {
+    const chatId = await ensureChat();
     const r = await fetch('/api/retell-chat/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       cache: 'no-store',
-      body: JSON.stringify({ chatId: id, text }),
+      body: JSON.stringify({ chatId, text }),
     });
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j?.ok) {
-      const err = new Error('SEND_FAILED');
-      err.status = r.status || j?.status;
-      err.detail = j;
-      throw err;
+      const e = new Error('SEND_FAILED');
+      e.status = r.status || j?.status;
+      e.detail = j;
+      throw e;
     }
     return j.reply || '';
-  }, []);
+  }, [ensureChat]);
 
-  const sendWithRetry = useCallback(
-    async (text) => {
-      try {
-        const id = await ensureChat(false);
-        return await sendOnce(id, text);
-      } catch (err) {
-        const code = Number(err?.status || 0);
-        const maybeExpired =
-          code === 400 ||
-          /expired|invalid|not.*ongoing|bad request/i.test(
-            String(err?.detail || err?.message || '')
-          );
-        if (maybeExpired) {
-          const fresh = await ensureChat(true);
-          try { localStorage.setItem(LS_CHAT_KEY, fresh); } catch {}
-          return await sendOnce(fresh, text);
-        }
-        throw err;
-      }
-    },
-    [ensureChat, sendOnce]
-  );
-
-  // ---------- Avatar helpers ----------
+  // ======== HEYGEN START/STOP (serialized + backoff) ========
   const stopAvatar = useCallback(async () => {
-    if (stopOnceRef.current) return;
-    stopOnceRef.current = true;
-    try { const a = avatarRef.current; if (a?.stopAvatar) await a.stopAvatar(); } catch {}
+    try { await avatarRef.current?.stopAvatar?.(); } catch {}
     avatarRef.current = null;
-    const v = videoRef.current;
-    if (v) { try { v.pause?.(); } catch {}; v.srcObject = null; }
+    if (videoRef.current) videoRef.current.srcObject = null;
   }, []);
 
   const speak = useCallback(async (text) => {
     if (!text) return;
     const sdk = await loadHeygenSdk();
     const a = avatarRef.current;
-    if (!sdk || !a) { speakQueueRef.current.push(text); return; }
-
-    const v = videoRef.current;
-    if (v) {
-      try {
-        v.muted = false;
-        setMuted(false);
-        if (!playPromiseRef.current) {
-          playPromiseRef.current = v.play().catch(() => {});
-          await playPromiseRef.current;
-          playPromiseRef.current = null;
-        }
-      } catch {}
+    if (!a) return;
+    // try to unmute (if the user tapped open, autoplay will allow)
+    if (videoRef.current) {
+      try { videoRef.current.muted = false; await videoRef.current.play(); setMuted(false); } catch {}
     }
-
-    const payload = sdk.TaskType
-      ? { text, taskType: sdk.TaskType.REPEAT }
-      : { text, taskType: 'REPEAT' };
-
-    try { await a.speak(payload); }
-    catch { speakQueueRef.current.push(text); }
+    try {
+      const payload = sdk.TaskType ? { text, taskType: sdk.TaskType.REPEAT } : { text, taskType: 'REPEAT' };
+      await a.speak(payload);
+    } catch {}
   }, []);
 
-  const flushSpeakQueue = useCallback(async () => {
-    if (flushingRef.current) return;
-    flushingRef.current = true;
-    while (speakQueueRef.current.length) {
-      const t = speakQueueRef.current.shift();
-      await speak(t);
-    }
-    flushingRef.current = false;
-  }, [speak]);
+  const startAvatar = useCallback(async () => {
+    if (startLockRef.current) return startLockRef.current; // serialize
+    startLockRef.current = (async () => {
+      setStatus(retriesRef.current ? 'reconnecting' : 'connecting');
+      setHint('');
+      // get token
+      const tr = await fetch('/api/heygen-token', { cache: 'no-store' });
+      const tj = await tr.json().catch(() => ({}));
+      const token = tj?.token || tj?.data?.token || '';
+      if (!token) throw new Error('NO_TOKEN');
 
-  const beginAvatar = useCallback(async () => {
-    if (startLockRef.current) return;
-    startLockRef.current = true;
-    stopOnceRef.current = false;
+      const sdk = await loadHeygenSdk();
+      const { StreamingAvatar, StreamingEvents, AvatarQuality } = sdk || {};
+      if (!StreamingAvatar) throw new Error('SDK');
 
-    let attempt = 0;
-    const maxAttempts = 5;
+      const avatar = new StreamingAvatar({ token, debug: false });
+      avatarRef.current = avatar;
 
-    while (attempt < maxAttempts) {
-      attempt += 1;
-      setStatus(attempt === 1 ? 'connecting' : 'reconnecting');
-      setUiMsg(attempt === 1 ? 'Connecting…' : 'Reconnecting…');
+      avatar.on(StreamingEvents.STREAM_READY, (evt) => {
+        const stream = evt?.detail;
+        if (videoRef.current && stream instanceof MediaStream) {
+          videoRef.current.srcObject = stream;
+          // We opened the panel via user click. Try to unmute right away.
+          (async () => {
+            try { videoRef.current.muted = false; await videoRef.current.play(); setMuted(false); }
+            catch { videoRef.current.muted = true; setMuted(true); }
+            finally { setStatus('ready'); }
+          })();
+        } else {
+          setStatus('error');
+          setHint('Media not available. Please try again.');
+        }
+      });
 
-      try {
-        const tr = await fetch('/api/heygen-token', { cache: 'no-store' });
-        const tj = await tr.json().catch(() => ({}));
-        const token = tj?.token || tj?.data?.token || tj?.accessToken || '';
-        if (!token) throw new Error('TOKEN_MISSING');
+      avatar.on(StreamingEvents.STREAM_DISCONNECTED, async () => {
+        await stopAvatar();
+        if (destroyRef.current) return;
+        const attempt = retriesRef.current + 1;
+        if (attempt > MAX_RETRIES) {
+          setStatus('error');
+          setHint('Connection lost. Please reopen.');
+          return;
+        }
+        retriesRef.current = attempt;
+        const jitter = Math.random() * 300;
+        const backoff = Math.min(1200 * Math.pow(2, attempt - 1) + jitter, 9000);
+        setTimeout(() => { startAvatar().catch(() => {}); }, backoff);
+      });
 
-        const sdk = await loadHeygenSdk();
-        if (!sdk?.StreamingAvatar) throw new Error('SDK_LOAD_FAILED');
+      await avatar.createStartAvatar({
+        avatarName: AVATAR_NAME,
+        quality: AvatarQuality?.Medium || 'medium', // stable default
+        welcomeMessage: '',
+      });
 
-        const { StreamingAvatar, StreamingEvents } = sdk;
-        const avatar = new StreamingAvatar({ token, debug: false });
-        avatarRef.current = avatar;
+      return avatar;
+    })().finally(() => {
+      // allow new starts only after the current promise resolves/rejects
+      startLockRef.current = null;
+    });
 
-        const onReady = (evt) => {
-          const stream = evt?.detail;
-          const v = videoRef.current;
-          if (v && stream instanceof MediaStream) {
-            v.srcObject = stream;
-            v.muted = true;
-            (async () => {
-              try {
-                if (!playPromiseRef.current) {
-                  playPromiseRef.current = v.play().catch(() => {});
-                  await playPromiseRef.current;
-                  playPromiseRef.current = null;
-                }
-              } catch {}
-              setMuted(true);
-              setStatus('ready');
-              setUiMsg('');
-              flushSpeakQueue();
-            })();
-          }
-        };
+    return startLockRef.current;
+  }, [stopAvatar]);
 
-        const onDisconnected = async () => {
-          try { avatar.off(StreamingEvents.STREAM_READY, onReady); } catch {}
-          try { avatar.off(StreamingEvents.STREAM_DISCONNECTED, onDisconnected); } catch {}
-          await stopAvatar();
-          throw new Error('DISCONNECTED');
-        };
-
-        avatar.on(StreamingEvents.STREAM_READY, onReady);
-        avatar.on(StreamingEvents.STREAM_DISCONNECTED, onDisconnected);
-
-        // quality selection (low by default)
-        const qmap = {
-          low: sdk.AvatarQuality?.Low || 'low',
-          medium: sdk.AvatarQuality?.Medium || 'medium',
-          high: sdk.AvatarQuality?.High || 'high',
-        };
-
-        await avatar.createStartAvatar({
-          avatarName: avatarId,
-          quality: qmap[quality] || qmap.low,
-          welcomeMessage: '',
-        });
-
-        const readyCheck = (async () => {
-          await sleep(10000);
-          if (status !== 'ready') throw new Error('NOT_READY_TIMEOUT');
-        })();
-
-        await readyCheck;
-        startLockRef.current = false;
-        return;
-      } catch {
-        const base = 600 * Math.pow(2, attempt - 1);
-        const jitter = Math.floor(Math.random() * 300);
-        const wait = Math.min(6000, base + jitter);
-        setUiMsg('Reconnecting…');
-        await sleep(wait);
-        continue;
-      }
-    }
-
-    setStatus('error');
-    setUiMsg('Network unstable. Please try again.');
-    startLockRef.current = false;
-  }, [avatarId, flushSpeakQueue, quality, status, stopAvatar]);
-
-  // ---------- Mic (Web Speech) ----------
+  // ======== MIC / SPEECH RECOGNITION ========
   const stopMic = useCallback(() => {
     micWantedRef.current = false;
     micActiveRef.current = false;
     try { recogRef.current?.stop?.(); } catch {}
     recogRef.current = null;
-    setMicState('off');
   }, []);
 
   const startMic = useCallback(async () => {
     if (micActiveRef.current) return;
+    micWantedRef.current = true;
 
-    const SR =
-      typeof window !== 'undefined' &&
-      (window.SpeechRecognition || window.webkitSpeechRecognition);
-    if (!SR) { setMicState('unsupported'); return; }
-
+    // (1) user gesture guaranteed (came from click handler)
+    // resume audio context and get mic permission
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (Ctx) { const ctx = new Ctx(); await ctx.resume().catch(() => {}); }
+    } catch {}
     try {
       const gum = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
       });
-      try { gum.getTracks().forEach((t) => t.stop()); } catch {}
+      try { gum.getTracks().forEach(t => t.stop()); } catch {}
     } catch {
-      setMicState('blocked');
+      setHint('Mic permission blocked.');
       return;
     }
+
+    // (2) start SR if supported
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) { setHint('Voice input not supported on this browser.'); return; }
 
     try { recogRef.current?.stop?.(); } catch {}
     const rec = new SR();
     recogRef.current = rec;
+    micActiveRef.current = true;
     const mySession = ++micSessionIdRef.current;
 
     rec.lang = 'en-US';
@@ -313,17 +218,17 @@ export default function FloatingAvatarWidget({
       if (micSessionIdRef.current !== mySession) return;
       const last = e.results?.[e.results.length - 1];
       const text = (last?.[0]?.transcript || '').trim();
-      if (!text || guardUser.current(text)) return;
+      if (!text || guardUser(text)) return;
 
-      pushMsg('user', text);
+      setMessages(p => [...p, { role: 'user', text }]);
       try {
-        const reply = await sendWithRetry(text);
-        if (!guardAssistant.current(reply)) {
-          pushMsg('assistant', reply);
-          await speak(reply);
+        const reply = await sendToAgent(text);
+        if (!guardAssistant(reply)) {
+          setMessages(p => [...p, { role: 'assistant', text: reply }]);
+          speak(reply);
         }
       } catch (err) {
-        pushMsg('system', friendlyFail(Number(err?.status || 0)));
+        setMessages(p => [...p, { role: 'system', text: 'Message failed. Please try again.' }]);
       }
     };
     rec.onend = () => {
@@ -333,229 +238,227 @@ export default function FloatingAvatarWidget({
     };
     rec.onerror = () => {
       if (micWantedRef.current && micSessionIdRef.current === mySession) {
-        setTimeout(() => { try { rec.start(); } catch {} }, 350);
+        setTimeout(() => { try { rec.start(); } catch {} }, 400);
       }
     };
 
-    try {
-      rec.start();
-      micWantedRef.current = true;
-      micActiveRef.current = true;
-      setMicState('on');
-    } catch {
-      setMicState('blocked');
-    }
-  }, [pushMsg, sendWithRetry, speak]);
+    try { rec.start(); } catch {}
+  }, [guardAssistant, guardUser, sendToAgent, speak]);
 
-  // ---------- Open / Close ----------
-  const openWidget = useCallback(async () => {
-    setIsOpen(true);
-    try {
-      const ac = new (window.AudioContext || window.webkitAudioContext)();
-      await ac.resume(); ac.close?.();
-    } catch {}
-    setStatus('connecting'); setUiMsg('Connecting…');
-    await beginAvatar();
-    await ensureChat(false);
-    await startMic();
-  }, [beginAvatar, ensureChat, startMic]);
+  // ======== OPEN/CLOSE ========
+  const handleOpen = useCallback(async () => {
+    hadGestureRef.current = true;
+    destroyRef.current = false;
+    setOpen(true);
+    setShowChat(false); // start in video-only view like D-ID
+    setHint('');
+    retriesRef.current = 0;
 
-  const closeWidget = useCallback(async () => {
-    setIsOpen(false);
-    setIsFullscreen(false);
-    setShowChat(false);
-    await stopAvatar();
+    // Use the same click gesture to unlock audio + mic and start avatar
+    await startAvatar().catch(() => {
+      setStatus('error');
+      setHint('Unable to connect. Please try again.');
+    });
+    // Arm the mic after we kicked the stream start
+    startMic();
+  }, [startAvatar, startMic]);
+
+  const handleClose = useCallback(async () => {
+    destroyRef.current = true;
+    setOpen(false);
     stopMic();
+    await stopAvatar();
     setStatus('idle');
-    setUiMsg('');
+    setHint('');
   }, [stopAvatar, stopMic]);
 
-  // auto-open if defaultOpen
+  const toggleMute = useCallback(() => {
+    if (!videoRef.current) return;
+    const next = !videoRef.current.muted;
+    videoRef.current.muted = next;
+    setMuted(next);
+    if (!next) videoRef.current.play().catch(() => {});
+  }, []);
+
+  const handleSubmit = useCallback(async (e) => {
+    e?.preventDefault?.();
+    const text = input.trim();
+    if (!text) return;
+    setInput('');
+    if (!guardUser(text)) setMessages(p => [...p, { role: 'user', text }]);
+    try {
+      const reply = await sendToAgent(text);
+      if (!guardAssistant(reply)) {
+        setMessages(p => [...p, { role: 'assistant', text: reply }]);
+        speak(reply);
+      }
+    } catch {
+      setMessages(p => [...p, { role: 'system', text: 'Message failed. Please try again.' }]);
+    }
+  }, [input, guardUser, guardAssistant, sendToAgent, speak]);
+
+  // Allow opening via custom event if you want to wire your site icon:
   useEffect(() => {
-    if (defaultOpen) openWidget();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [defaultOpen]);
+    const onOpen = () => handleOpen();
+    const onClose = () => handleClose();
+    window.addEventListener('avatar-widget:open', onOpen);
+    window.addEventListener('avatar-widget:close', onClose);
+    return () => {
+      window.removeEventListener('avatar-widget:open', onOpen);
+      window.removeEventListener('avatar-widget:close', onClose);
+    };
+  }, [handleOpen, handleClose]);
 
-  // cleanup
-  useEffect(() => () => { stopAvatar(); stopMic(); }, [stopAvatar, stopMic]);
-
-  // UI sizing
-  const baseW = isFullscreen ? 'min(100vw, 1200px)' : 'min(92vw, 720px)';
-  const baseH = isFullscreen ? 'min(100vh, 720px)' : 'min(70vh, 520px)';
-
+  // ========== RENDER ==========
   return (
     <>
-      {showLauncher && !isOpen && (
+      {/* Floating Action Button */}
+      {!open && (
         <button
-          onClick={openWidget}
+          onClick={handleOpen}
           aria-label="Open assistant"
-          style={{
-            position: 'fixed', right: 18, bottom: 18,
-            width: 56, height: 56, borderRadius: 999, border: 'none',
-            boxShadow: '0 8px 24px rgba(0,0,0,0.35)', background: '#0ea5e9',
-            color: '#fff', fontSize: 22, cursor: 'pointer', zIndex: 1000,
-          }}
+          style={fabStyle}
         >
-          ✨
+          <span style={{ fontSize: 22 }}>🧠</span>
         </button>
       )}
 
-      {isOpen && (
-        <div
-          style={{
-            position: 'fixed',
-            right: isFullscreen ? '50%' : 18,
-            bottom: isFullscreen ? '50%' : 18,
-            transform: isFullscreen ? 'translate(50%, 50%)' : 'none',
-            width: baseW, height: baseH,
-            borderRadius: isFullscreen ? 0 : 16, overflow: 'hidden',
-            background: '#0f0f10', border: '1px solid #1f242c',
-            boxShadow: '0 18px 60px rgba(0,0,0,0.45)',
-            display: 'grid',
-            gridTemplateColumns: showChat ? '1fr 340px' : '1fr',
-            zIndex: 1000,
-          }}
-        >
-          {/* Video */}
-          <div style={{ position: 'relative', background: '#000' }}>
-            <video
-              ref={videoRef}
-              playsInline
-              autoPlay
-              muted={muted}
-              style={{ width: '100%', height: '100%', objectFit: 'cover', background: '#000' }}
-            />
-
-            {/* Controls */}
-            <div style={{ position: 'absolute', top: 8, right: 8, display: 'flex', gap: 8, zIndex: 2 }}>
-              <button onClick={() => setIsFullscreen((v) => !v)} title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'} style={btn()}>🗖</button>
-              <button onClick={() => setShowChat((v) => !v)} title={showChat ? 'Hide chat' : 'Show chat'} style={btn()}>💬</button>
-              <button onClick={async () => {
-                const v = videoRef.current;
-                if (!v) return;
-                const next = !v.muted;
-                v.muted = next;
-                setMuted(next);
-                if (!next) {
-                  try {
-                    if (!playPromiseRef.current) {
-                      playPromiseRef.current = v.play().catch(() => {});
-                      await playPromiseRef.current;
-                      playPromiseRef.current = null;
-                    }
-                  } catch {}
-                }
-              }} title={muted ? 'Unmute' : 'Mute'} style={btn()}>{muted ? '🔈' : '🔊'}</button>
-              <button onClick={closeWidget} title="Close" style={btn()}>✕</button>
+      {/* Panel */}
+      {open && (
+        <div style={panelWrap}>
+          <div style={panelCard}>
+            {/* Header controls */}
+            <div style={panelHeader}>
+              <button title="Toggle captions" onClick={() => setShowChat((v) => !v)} style={iconBtn}>💬</button>
+              <button title={muted ? 'Unmute' : 'Mute'} onClick={toggleMute} style={iconBtn}>
+                {muted ? '🔈' : '🔊'}
+              </button>
+              <button title="Close" onClick={handleClose} style={iconBtn}>✕</button>
             </div>
 
-            {/* Mic chip */}
-            <div style={{ position: 'absolute', left: 10, bottom: 10, zIndex: 2 }}>
-              <span style={{ background: 'rgba(0,0,0,0.55)', color: '#fff', fontSize: 12, padding: '6px 10px', borderRadius: 999 }}>
-                {micState === 'on' ? '🎙️ Mic on'
-                  : micState === 'blocked' ? 'Tap “Allow mic”'
-                  : micState === 'unsupported' ? 'Voice not supported'
-                  : micState === 'starting' ? 'Mic starting…'
-                  : 'Mic off'}
-              </span>
+            {/* Video area */}
+            <div style={videoBox}>
+              <video
+                ref={videoRef}
+                autoPlay
+                playsInline
+                muted={muted}
+                style={{ width: '100%', height: '100%', objectFit: 'cover', background: '#000' }}
+              />
+              {status !== 'ready' && (
+                <div style={overlay}>
+                  {status === 'connecting' && 'Connecting…'}
+                  {status === 'reconnecting' && 'Reconnecting…'}
+                  {status === 'error' && 'Error'}
+                </div>
+              )}
+              {!!hint && <div style={hintBadge}>{hint}</div>}
+              <div style={micBadge}>{micActiveRef.current ? 'Mic on' : 'Mic off'}</div>
             </div>
 
-            {/* Status overlay */}
-            {status !== 'ready' && (
-              <div style={{
-                position: 'absolute', inset: 0, display: 'grid', placeItems: 'center',
-                color: '#fff', background: 'rgba(0,0,0,0.35)', fontWeight: 700,
-              }}>
-                {uiMsg || 'Connecting…'}
+            {/* Chat area (collapsible) */}
+            {showChat && (
+              <div style={chatWrap}>
+                <div style={chatLog}>
+                  {messages.length === 0 ? (
+                    <div style={{ opacity: 0.75 }}>Say something or type below…</div>
+                  ) : (
+                    messages.map((m, i) => (
+                      <div key={i} style={{ marginBottom: 8 }}>
+                        <div style={{
+                          fontWeight: 700, fontSize: 12,
+                          color: m.role === 'user' ? '#60a5fa' : m.role === 'assistant' ? '#34d399' : '#e879f9'
+                        }}>
+                          {m.role}
+                        </div>
+                        <div style={{ whiteSpace: 'pre-wrap' }}>{m.text}</div>
+                      </div>
+                    ))
+                  )}
+                </div>
+                <form onSubmit={handleSubmit} style={chatForm}>
+                  <input
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    placeholder="Type your message…"
+                    style={chatInput}
+                  />
+                  <button type="submit" style={sendBtn}>Send</button>
+                </form>
               </div>
             )}
           </div>
-
-          {/* Chat */}
-          {showChat && (
-            <div
-              role="region"
-              aria-label="Chat"
-              style={{
-                background: '#0f0f10',
-                color: '#eaeaea',
-                borderLeft: '1px solid #1f242c',
-                display: 'grid',
-                gridTemplateRows: '1fr auto',
-              }}
-            >
-              <div style={{ overflowY: 'auto', padding: 12, fontSize: 14 }}>
-                {messages.length === 0 ? (
-                  <div style={{ opacity: 0.7 }}>Say something to get started…</div>
-                ) : (
-                  messages.map((m, i) => (
-                    <div key={i} style={{ marginBottom: 10 }}>
-                      <div style={{
-                        fontWeight: 700, fontSize: 12,
-                        color: m.role === 'user' ? '#60a5fa' : m.role === 'assistant' ? '#34d399' : '#e879f9',
-                      }}>
-                        {m.role === 'assistant' ? 'Assistant' : m.role[0].toUpperCase() + m.role.slice(1)}
-                      </div>
-                      <div style={{ whiteSpace: 'pre-wrap' }}>{m.text}</div>
-                    </div>
-                  ))
-                )}
-              </div>
-              <form onSubmit={async (e) => {
-                e?.preventDefault?.();
-                const text = (input || '').trim();
-                if (!text) return;
-                setInput('');
-                if (!guardUser.current(text)) pushMsg('user', text);
-                try {
-                  const reply = await sendWithRetry(text);
-                  if (!guardAssistant.current(reply)) {
-                    pushMsg('assistant', reply);
-                    await speak(reply);
-                  }
-                } catch (err) {
-                  pushMsg('system', friendlyFail(Number(err?.status || 0)));
-                }
-              }} style={{ display: 'flex', gap: 8, padding: 10, borderTop: '1px solid #1f242c' }}>
-                <input
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  placeholder="Type your message…"
-                  style={{
-                    flex: 1, borderRadius: 10, border: '1px solid #2a2a30',
-                    background: '#15151a', color: '#eaeaea', padding: '10px 12px', outline: 'none',
-                  }}
-                />
-                <button
-                  type="submit"
-                  disabled={!input.trim()}
-                  style={{
-                    padding: '10px 14px', borderRadius: 10,
-                    border: '1px solid #2563eb', background: '#2563eb', color: '#fff', fontWeight: 700,
-                    cursor: input.trim() ? 'pointer' : 'default',
-                  }}
-                >
-                  Send
-                </button>
-              </form>
-            </div>
-          )}
         </div>
       )}
     </>
   );
 }
 
-function btn() {
-  return {
-    border: 'none',
-    background: 'rgba(0,0,0,0.55)',
-    color: '#fff',
-    width: 34,
-    height: 34,
-    borderRadius: 10,
-    display: 'grid',
-    placeItems: 'center',
-    cursor: 'pointer',
-  };
-}
+/* ---------- styles (inline to keep this self-contained) ---------- */
+const fabStyle = {
+  position: 'fixed', right: 16, bottom: 16,
+  width: 56, height: 56, borderRadius: 9999,
+  display: 'grid', placeItems: 'center',
+  background: '#2563eb', color: '#fff',
+  border: 'none', boxShadow: '0 8px 24px rgba(0,0,0,0.25)',
+  cursor: 'pointer', zIndex: 50
+};
+
+const panelWrap = {
+  position: 'fixed', right: 16, bottom: 16,
+  width: 420, maxWidth: '95vw', height: 520, maxHeight: '85vh',
+  zIndex: 50
+};
+
+const panelCard = {
+  width: '100%', height: '100%',
+  background: '#0b0b0c', color: '#eaeaea',
+  border: '1px solid #242428', borderRadius: 16,
+  boxShadow: '0 16px 40px rgba(0,0,0,0.45)',
+  display: 'grid', gridTemplateRows: 'auto 1fr auto',
+  overflow: 'hidden'
+};
+
+const panelHeader = {
+  display: 'flex', gap: 8, justifyContent: 'flex-end',
+  padding: 8, borderBottom: '1px solid #1f1f23'
+};
+
+const iconBtn = {
+  width: 36, height: 36, borderRadius: 10,
+  display: 'grid', placeItems: 'center',
+  background: 'rgba(255,255,255,0.06)', color: '#fff',
+  border: '1px solid rgba(255,255,255,0.15)',
+  cursor: 'pointer'
+};
+
+const videoBox = { position: 'relative', width: '100%', height: 280, background: '#000' };
+
+const overlay = {
+  position: 'absolute', inset: 0, display: 'grid', placeItems: 'center',
+  color: '#fff', background: 'rgba(0,0,0,0.35)', fontWeight: 700
+};
+
+const hintBadge = {
+  position: 'absolute', bottom: 8, left: 8,
+  background: 'rgba(0,0,0,0.6)', color: '#fff',
+  padding: '4px 8px', borderRadius: 999, fontSize: 12
+};
+
+const micBadge = {
+  position: 'absolute', bottom: 8, right: 8,
+  background: 'rgba(0,0,0,0.6)', color: '#fff',
+  padding: '4px 8px', borderRadius: 999, fontSize: 12
+};
+
+const chatWrap = { display: 'grid', gridTemplateRows: '1fr auto', height: '100%', borderTop: '1px solid #1f1f23' };
+const chatLog  = { padding: 10, overflowY: 'auto', fontSize: 14 };
+const chatForm = { display: 'flex', gap: 8, padding: 10, borderTop: '1px solid #1f1f23' };
+const chatInput = {
+  flex: 1, borderRadius: 10, border: '1px solid #2a2a30',
+  background: '#15151a', color: '#eaeaea', padding: '10px 12px', outline: 'none'
+};
+const sendBtn = {
+  padding: '10px 14px', borderRadius: 10, border: '1px solid #2563eb',
+  background: '#2563eb', color: '#fff', fontWeight: 700, cursor: 'pointer'
+};
