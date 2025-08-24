@@ -7,7 +7,10 @@ export async function GET() {
   const agentId = process.env.RETELL_CHAT_AGENT_ID;
 
   if (!apiKey || !agentId) {
-    return Response.json({ ok: false, status: 500, error: 'CONFIG' }, { headers: { 'Cache-Control': 'no-store' } });
+    return Response.json(
+      { ok: false, status: 500, error: 'CONFIG' },
+      { headers: { 'Cache-Control': 'no-store' } }
+    );
   }
 
   try {
@@ -22,19 +25,29 @@ export async function GET() {
     });
 
     const j = await r.json().catch(() => ({}));
-
     if (!r.ok) {
-      // Bubble up exact error for debugging in the browser console
-      return Response.json({ ok: false, status: r.status, error: j }, { headers: { 'Cache-Control': 'no-store' } });
+      return Response.json(
+        { ok: false, status: r.status, error: j },
+        { headers: { 'Cache-Control': 'no-store' } }
+      );
     }
 
     const chatId = j?.chat_id || j?.id;
     if (!chatId) {
-      return Response.json({ ok: false, status: 502, error: 'NO_CHAT_ID' }, { headers: { 'Cache-Control': 'no-store' } });
+      return Response.json(
+        { ok: false, status: 502, error: 'NO_CHAT_ID' },
+        { headers: { 'Cache-Control': 'no-store' } }
+      );
     }
 
-    return Response.json({ ok: true, chatId }, { headers: { 'Cache-Control': 'no-store' } });
-  } catch (e) {
-    return Response.json({ ok: false, status: 500, error: 'NETWORK' }, { headers: { 'Cache-Control': 'no-store' } });
+    return Response.json(
+      { ok: true, chatId },
+      { headers: { 'Cache-Control': 'no-store' } }
+    );
+  } catch {
+    return Response.json(
+      { ok: false, status: 500, error: 'NETWORK' },
+      { headers: { 'Cache-Control': 'no-store' } }
+    );
   }
 }
