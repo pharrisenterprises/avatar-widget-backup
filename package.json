@@ -5,14 +5,16 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start",
-    "lint": "next lint"
+    "start": "next start"
   },
   "dependencies": {
     "next": "15.4.6",
     "react": "18.3.1",
     "react-dom": "18.3.1",
-    "@heygen/streaming-avatar": "2.0.16",
-    "livekit-client": "2.15.5"
+    "@heygen/streaming-avatar": "2.0.16"
+  },
+  "devDependencies": {
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.47"
   }
 }
