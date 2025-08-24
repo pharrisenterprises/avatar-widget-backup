@@ -1,11 +1,7 @@
 'use client';
 
 import React, {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
+  useCallback, useEffect, useMemo, useRef, useState,
 } from 'react';
 import { loadHeygenSdk } from '../lib/loadHeygenSdk';
 
@@ -24,8 +20,9 @@ function makeDupeGuard(windowMs = 2500) {
 
 export default function FloatingAvatarWidget({
   defaultOpen = false,
-  defaultShowChat = true,
-  quality = 'medium', // 'low' | 'medium' | 'high'
+  defaultShowChat = false,   // ◀ chat hidden until 💬
+  showLauncher = true,       // ◀ hide the ✨ button when embedding on /embed
+  quality = 'low',           // 'low' | 'medium' | 'high'
 }) {
   const [isOpen, setIsOpen] = useState(defaultOpen);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -204,7 +201,7 @@ export default function FloatingAvatarWidget({
         const sdk = await loadHeygenSdk();
         if (!sdk?.StreamingAvatar) throw new Error('SDK_LOAD_FAILED');
 
-        const { StreamingAvatar, AvatarQuality, StreamingEvents } = sdk;
+        const { StreamingAvatar, StreamingEvents } = sdk;
         const avatar = new StreamingAvatar({ token, debug: false });
         avatarRef.current = avatar;
 
@@ -240,6 +237,7 @@ export default function FloatingAvatarWidget({
         avatar.on(StreamingEvents.STREAM_READY, onReady);
         avatar.on(StreamingEvents.STREAM_DISCONNECTED, onDisconnected);
 
+        // quality selection (low by default)
         const qmap = {
           low: sdk.AvatarQuality?.Low || 'low',
           medium: sdk.AvatarQuality?.Medium || 'medium',
@@ -248,7 +246,7 @@ export default function FloatingAvatarWidget({
 
         await avatar.createStartAvatar({
           avatarName: avatarId,
-          quality: qmap[quality] || qmap.medium,
+          quality: qmap[quality] || qmap.low,
           welcomeMessage: '',
         });
 
@@ -352,11 +350,9 @@ export default function FloatingAvatarWidget({
   // ---------- Open / Close ----------
   const openWidget = useCallback(async () => {
     setIsOpen(true);
-    // treat button click as user gesture: resume AudioContext
     try {
       const ac = new (window.AudioContext || window.webkitAudioContext)();
-      await ac.resume();
-      ac.close?.();
+      await ac.resume(); ac.close?.();
     } catch {}
     setStatus('connecting'); setUiMsg('Connecting…');
     await beginAvatar();
@@ -374,40 +370,11 @@ export default function FloatingAvatarWidget({
     setUiMsg('');
   }, [stopAvatar, stopMic]);
 
-  // ---------- Manual actions ----------
-  const toggleMute = useCallback(async () => {
-    const v = videoRef.current;
-    if (!v) return;
-    const next = !v.muted;
-    v.muted = next;
-    setMuted(next);
-    if (!next) {
-      try {
-        if (!playPromiseRef.current) {
-          playPromiseRef.current = v.play().catch(() => {});
-          await playPromiseRef.current;
-          playPromiseRef.current = null;
-        }
-      } catch {}
-    }
-  }, []);
-
-  const sendManual = useCallback(async (e) => {
-    e?.preventDefault?.();
-    const text = (input || '').trim();
-    if (!text) return;
-    setInput('');
-    if (!guardUser.current(text)) pushMsg('user', text);
-    try {
-      const reply = await sendWithRetry(text);
-      if (!guardAssistant.current(reply)) {
-        pushMsg('assistant', reply);
-        await speak(reply);
-      }
-    } catch (err) {
-      pushMsg('system', friendlyFail(Number(err?.status || 0)));
-    }
-  }, [input, pushMsg, sendWithRetry, speak]);
+  // auto-open if defaultOpen
+  useEffect(() => {
+    if (defaultOpen) openWidget();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [defaultOpen]);
 
   // cleanup
   useEffect(() => () => { stopAvatar(); stopMic(); }, [stopAvatar, stopMic]);
@@ -418,147 +385,9 @@ export default function FloatingAvatarWidget({
 
   return (
     <>
-      {!isOpen && (
+      {showLauncher && !isOpen && (
         <button
           onClick={openWidget}
           aria-label="Open assistant"
           style={{
             position: 'fixed', right: 18, bottom: 18,
-            width: 56, height: 56, borderRadius: 999, border: 'none',
-            boxShadow: '0 8px 24px rgba(0,0,0,0.35)', background: '#0ea5e9',
-            color: '#fff', fontSize: 22, cursor: 'pointer', zIndex: 1000,
-          }}
-        >
-          ✨
-        </button>
-      )}
-
-      {isOpen && (
-        <div
-          style={{
-            position: 'fixed',
-            right: isFullscreen ? '50%' : 18,
-            bottom: isFullscreen ? '50%' : 18,
-            transform: isFullscreen ? 'translate(50%, 50%)' : 'none',
-            width: baseW, height: baseH,
-            borderRadius: isFullscreen ? 0 : 16, overflow: 'hidden',
-            background: '#0f0f10', border: '1px solid #1f242c',
-            boxShadow: '0 18px 60px rgba(0,0,0,0.45)',
-            display: 'grid',
-            gridTemplateColumns: showChat ? '1fr 340px' : '1fr',
-            zIndex: 1000,
-          }}
-        >
-          {/* Video */}
-          <div style={{ position: 'relative', background: '#000' }}>
-            <video
-              ref={videoRef}
-              playsInline
-              autoPlay
-              muted={muted}
-              style={{ width: '100%', height: '100%', objectFit: 'cover', background: '#000' }}
-            />
-
-            {/* Controls */}
-            <div style={{ position: 'absolute', top: 8, right: 8, display: 'flex', gap: 8, zIndex: 2 }}>
-              <button onClick={() => setIsFullscreen((v) => !v)} title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'} style={btn()}>🗖</button>
-              <button onClick={toggleMute} title={muted ? 'Unmute' : 'Mute'} style={btn()}>{muted ? '🔈' : '🔊'}</button>
-              <button onClick={() => setShowChat((v) => !v)} title={showChat ? 'Hide chat' : 'Show chat'} style={btn()}>💬</button>
-              <button onClick={closeWidget} title="Close" style={btn()}>✕</button>
-            </div>
-
-            {/* Mic chip */}
-            <div style={{ position: 'absolute', left: 10, bottom: 10, zIndex: 2 }}>
-              <span style={{ background: 'rgba(0,0,0,0.55)', color: '#fff', fontSize: 12, padding: '6px 10px', borderRadius: 999 }}>
-                {micState === 'on' ? '🎙️ Mic on'
-                  : micState === 'blocked' ? 'Tap “Allow mic”'
-                  : micState === 'unsupported' ? 'Voice not supported'
-                  : micState === 'starting' ? 'Mic starting…'
-                  : 'Mic off'}
-              </span>
-            </div>
-
-            {/* Status overlay */}
-            {status !== 'ready' && (
-              <div style={{
-                position: 'absolute', inset: 0, display: 'grid', placeItems: 'center',
-                color: '#fff', background: 'rgba(0,0,0,0.35)', fontWeight: 700,
-              }}>
-                {uiMsg || 'Connecting…'}
-              </div>
-            )}
-          </div>
-
-          {/* Chat */}
-          {showChat && (
-            <div
-              role="region"
-              aria-label="Chat"
-              style={{
-                background: '#0f0f10',
-                color: '#eaeaea',
-                borderLeft: '1px solid #1f242c',
-                display: 'grid',
-                gridTemplateRows: '1fr auto',
-              }}
-            >
-              <div style={{ overflowY: 'auto', padding: 12, fontSize: 14 }}>
-                {messages.length === 0 ? (
-                  <div style={{ opacity: 0.7 }}>Say something to get started…</div>
-                ) : (
-                  messages.map((m, i) => (
-                    <div key={i} style={{ marginBottom: 10 }}>
-                      <div style={{
-                        fontWeight: 700, fontSize: 12,
-                        color: m.role === 'user' ? '#60a5fa' : m.role === 'assistant' ? '#34d399' : '#e879f9',
-                      }}>
-                        {m.role === 'assistant' ? 'Assistant' : m.role[0].toUpperCase() + m.role.slice(1)}
-                      </div>
-                      <div style={{ whiteSpace: 'pre-wrap' }}>{m.text}</div>
-                    </div>
-                  ))
-                )}
-              </div>
-              <form onSubmit={sendManual} style={{ display: 'flex', gap: 8, padding: 10, borderTop: '1px solid #1f242c' }}>
-                <input
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  placeholder="Type your message…"
-                  style={{
-                    flex: 1, borderRadius: 10, border: '1px solid #2a2a30',
-                    background: '#15151a', color: '#eaeaea', padding: '10px 12px', outline: 'none',
-                  }}
-                />
-                <button
-                  type="submit"
-                  disabled={!input.trim()}
-                  style={{
-                    padding: '10px 14px', borderRadius: 10,
-                    border: '1px solid #2563eb', background: '#2563eb', color: '#fff', fontWeight: 700,
-                    cursor: input.trim() ? 'pointer' : 'default',
-                  }}
-                >
-                  Send
-                </button>
-              </form>
-            </div>
-          )}
-        </div>
-      )}
-    </>
-  );
-}
-
-function btn() {
-  return {
-    border: 'none',
-    background: 'rgba(0,0,0,0.55)',
-    color: '#fff',
-    width: 34,
-    height: 34,
-    borderRadius: 10,
-    display: 'grid',
-    placeItems: 'center',
-    cursor: 'pointer',
-  };
-}
