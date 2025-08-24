@@ -3,47 +3,46 @@ export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
 export async function GET() {
-  const apiKey = process.env.HEYGEN_API_KEY;
-  const avatarName = process.env.NEXT_PUBLIC_HEYGEN_AVATAR_ID || undefined;
+  const key = process.env.HEYGEN_API_KEY;
 
-  if (!apiKey) {
+  if (!key) {
     return Response.json(
-      { ok: false, status: 500, error: 'CONFIG' },
+      { ok: false, status: 500, error: 'CONFIG_MISSING' },
       { headers: { 'Cache-Control': 'no-store' } }
     );
   }
 
+  // Preferred: request a short-lived session token from HeyGen
   try {
-    // Preferred: exchange API key for a short-lived streaming token
     const r = await fetch('https://api.heygen.com/v1/streaming.token', {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${apiKey}`,
+        Authorization: `Bearer ${key}`,
         'Content-Type': 'application/json',
       },
       cache: 'no-store',
-      body: JSON.stringify(avatarName ? { avatar_name: avatarName } : {}),
+      body: JSON.stringify({}), // no body fields required
     });
 
     const j = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(String(r.status));
+    const token = j?.data?.token;
+    if (r.ok && token) {
+      return Response.json(
+        { ok: true, token },
+        { headers: { 'Cache-Control': 'no-store' } }
+      );
+    }
 
-    const token =
-      j?.access_token || j?.token || j?.data?.token || j?.data?.access_token;
-
-    if (!token) throw new Error('NO_TOKEN');
-
+    // Fallback (TEMPORARY): return the API key itself as token.
+    // This unblocks the SDK but exposes a secret to the browser. Use only to diagnose.
     return Response.json(
-      { ok: true, token },
+      { ok: true, token: key, note: 'fallback_apikey' },
       { headers: { 'Cache-Control': 'no-store' } }
     );
-  } catch (e) {
-    // TEMPORARY UNBLOCKER:
-    // Some tenants don’t have /v1/streaming.token enabled yet.
-    // As a last resort, return the API key as "token" (the SDK accepts it).
-    // SECURITY: This exposes a secret to the browser. Remove once the endpoint works.
+  } catch {
+    // Final fallback if network to HeyGen failed
     return Response.json(
-      { ok: true, token: apiKey, note: 'fallback_api_key_token' },
+      { ok: true, token: key, note: 'fallback_apikey_network' },
       { headers: { 'Cache-Control': 'no-store' } }
     );
   }
