@@ -1,28 +1,25 @@
 export const dynamic = 'force-dynamic';
 
 export async function GET() {
-  try {
-    const apiKey = process.env.HEYGEN_API_KEY || '';
-    if (!apiKey) {
-      return Response.json({ ok: false, error: 'Missing HEYGEN_API_KEY' }, { status: 500 });
-    }
-
-    // Session token for streaming
-    const r = await fetch('https://api.heygen.com/v1/streaming.create_token', {
-      method: 'POST',
-      headers: {
-        'X-Api-Key': apiKey,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({})
-    });
-
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok) return Response.json({ ok: false, status: r.status, body: j }, { status: r.status });
-
-    const token = j?.data?.token || j?.token || null;
-    return Response.json({ ok: true, token, raw: j });
-  } catch (e) {
-    return Response.json({ ok: false, error: e?.message || 'token failed' }, { status: 500 });
+  const apiKey = process.env.HEYGEN_API_KEY;
+  if (!apiKey) {
+    return Response.json({ error: 'CONFIG' }, { status: 500, headers: { 'Cache-Control': 'no-store' } });
   }
+  const r = await fetch('https://api.heygen.com/v1/streaming.token.create', {
+    method: 'POST',
+    headers: {
+      'x-api-key': apiKey,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({}),
+    cache: 'no-store',
+    // Vercel edge/workers: keep it simple
+  });
+  const j = await r.json().catch(() => ({}));
+  // Return a stable shape the client expects
+  const token = j?.data?.token || j?.token || j?.accessToken || '';
+  if (!r.ok || !token) {
+    return Response.json({ error: 'TOKEN' }, { status: r.status || 500, headers: { 'Cache-Control': 'no-store' } });
+  }
+  return Response.json({ ok: true, token }, { headers: { 'Cache-Control': 'no-store' } });
 }
