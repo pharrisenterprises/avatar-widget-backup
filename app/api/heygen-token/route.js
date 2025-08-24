@@ -1,72 +1,50 @@
 // app/api/heygen-token/route.js
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
-export const runtime = 'nodejs';
-
-// TEMP SWITCH: if you want to always fall back to API key as token,
-// set this to true. (Only for unblocking; exposes the key to the browser!)
-const ALWAYS_FALLBACK_TO_API_KEY = false;
 
 export async function GET() {
   const apiKey = process.env.HEYGEN_API_KEY;
+  const avatarName = process.env.NEXT_PUBLIC_HEYGEN_AVATAR_ID || undefined;
 
   if (!apiKey) {
     return Response.json(
-      { ok: false, status: 500, error: 'CONFIG:HEYGEN_API_KEY' },
-      { headers: { 'Cache-Control': 'no-store' } },
-    );
-  }
-
-  // If you know your tenant does not support /v1/streaming.token,
-  // set ALWAYS_FALLBACK_TO_API_KEY=true above.
-  if (ALWAYS_FALLBACK_TO_API_KEY) {
-    return Response.json(
-      { ok: true, token: apiKey, via: 'api-key-fallback' },
-      { headers: { 'Cache-Control': 'no-store' } },
+      { ok: false, status: 500, error: 'CONFIG' },
+      { headers: { 'Cache-Control': 'no-store' } }
     );
   }
 
   try {
+    // Preferred: exchange API key for a short-lived streaming token
     const r = await fetch('https://api.heygen.com/v1/streaming.token', {
       method: 'POST',
       headers: {
+        Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
-        'X-Api-Key': apiKey,
-        Authorization: `Bearer ${apiKey}`, // harmless to include both
       },
-      body: JSON.stringify({ expires_in: 600 }),
       cache: 'no-store',
+      body: JSON.stringify(avatarName ? { avatar_name: avatarName } : {}),
     });
 
     const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(String(r.status));
 
-    // If the endpoint exists and returns a token, use it.
-    if (r.ok) {
-      const token =
-        j?.token ||
-        j?.accessToken ||
-        j?.access_token ||
-        j?.data?.token ||
-        j?.data?.accessToken;
+    const token =
+      j?.access_token || j?.token || j?.data?.token || j?.data?.access_token;
 
-      if (token) {
-        return Response.json(
-          { ok: true, token, via: 'short-lived' },
-          { headers: { 'Cache-Control': 'no-store' } },
-        );
-      }
-    }
+    if (!token) throw new Error('NO_TOKEN');
 
-    // Fallback: return API key as the token (TEMPORARY UNBLOCK)
     return Response.json(
-      { ok: true, token: apiKey, via: 'api-key-fallback' },
-      { headers: { 'Cache-Control': 'no-store' } },
+      { ok: true, token },
+      { headers: { 'Cache-Control': 'no-store' } }
     );
-  } catch {
-    // Network error -> also fall back (TEMPORARY UNBLOCK)
+  } catch (e) {
+    // TEMPORARY UNBLOCKER:
+    // Some tenants don’t have /v1/streaming.token enabled yet.
+    // As a last resort, return the API key as "token" (the SDK accepts it).
+    // SECURITY: This exposes a secret to the browser. Remove once the endpoint works.
     return Response.json(
-      { ok: true, token: apiKey, via: 'api-key-fallback' },
-      { headers: { 'Cache-Control': 'no-store' } },
+      { ok: true, token: apiKey, note: 'fallback_api_key_token' },
+      { headers: { 'Cache-Control': 'no-store' } }
     );
   }
 }
