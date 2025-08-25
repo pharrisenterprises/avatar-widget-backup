@@ -1,14 +1,7 @@
 // app/embed/page.jsx
 'use client';
 
-import React, {
-  Suspense,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from 'react';
+import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { loadHeygenSdk } from '../lib/loadHeygenSdk';
 
@@ -34,21 +27,22 @@ function PageInner() {
     setMessages((p) => [...p, { role, text }]);
   }, []);
 
-  // ------- Retell helpers -------
+  // ------------ Retell helpers ------------
   const ensureChat = useCallback(async () => {
     if (chatId) return chatId;
     try {
       const s = window.localStorage.getItem(LS_CHAT_KEY);
       if (s) {
         setChatId(s);
+        console.log('[EMBED] Resumed Retell chat from LS:', s);
         return s;
       }
     } catch {}
+    console.log('[EMBED] Starting Retell chat…');
     const r = await fetch('/api/retell-chat/start', { cache: 'no-store' });
     const j = await r.json().catch(() => ({}));
-    if (!r.ok || !j?.ok || !j?.chatId) {
-      throw new Error('CHAT_START_FAILED');
-    }
+    console.log('[EMBED] /api/retell-chat/start ->', j);
+    if (!r.ok || !j?.ok || !j?.chatId) throw new Error('CHAT_START_FAILED');
     setChatId(j.chatId);
     try { window.localStorage.setItem(LS_CHAT_KEY, j.chatId); } catch {}
     return j.chatId;
@@ -62,6 +56,7 @@ function PageInner() {
       body: JSON.stringify({ chatId: id, text }),
     });
     const j = await r.json().catch(() => ({}));
+    console.log('[EMBED] /api/retell-chat/send ->', j);
     if (!r.ok || !j?.ok) {
       const err = new Error('SEND_FAILED');
       err.status = r.status;
@@ -70,7 +65,7 @@ function PageInner() {
     return j.reply || '';
   }, []);
 
-  // ------- HeyGen helpers -------
+  // ------------ HeyGen helpers ------------
   const stopAvatar = useCallback(async () => {
     try {
       const a = avatarRef.current;
@@ -84,61 +79,83 @@ function PageInner() {
     setStatus('connecting');
     setError('');
 
-    // token
+    // 1) Token
     const tr = await fetch('/api/heygen-token', { cache: 'no-store' });
     const tj = await tr.json().catch(() => ({}));
+    console.log('[EMBED] /api/heygen-token ->', tj);
     const token = tj?.token || tj?.data?.token || tj?.accessToken || '';
-    if (!token) throw new Error('TOKEN');
+    if (!token) throw new Error('TOKEN_MISSING');
 
+    // 2) SDK
     const sdk = await loadHeygenSdk();
-    if (!sdk?.StreamingAvatar) throw new Error('SDK');
+    console.log('[EMBED] HeyGen SDK loaded:', !!sdk, sdk && Object.keys(sdk));
+    if (!sdk?.StreamingAvatar) throw new Error('SDK_MISSING');
 
     const { StreamingAvatar, StreamingEvents, AvatarQuality, TaskType } = sdk;
-    const avatar = new StreamingAvatar({ token, debug: false });
+    const avatar = new StreamingAvatar({ token, debug: true });
     avatarRef.current = avatar;
 
     avatar.on(StreamingEvents.STREAM_READY, (evt) => {
+      console.log('[EMBED] STREAM_READY');
       const stream = evt?.detail;
       if (videoRef.current && stream instanceof MediaStream) {
         videoRef.current.srcObject = stream;
         videoRef.current.muted = true;
         videoRef.current.onloadedmetadata = () => {
-          videoRef.current.play().catch(() => {});
+          videoRef.current.play().catch((e) => console.warn('video.play() failed:', e?.message));
           setStatus('ready');
         };
       }
     });
 
     avatar.on(StreamingEvents.STREAM_DISCONNECTED, () => {
+      console.log('[EMBED] STREAM_DISCONNECTED');
       if (videoRef.current) videoRef.current.srcObject = null;
       setStatus('idle');
     });
+
+    if (StreamingEvents.ERROR) {
+      avatar.on(StreamingEvents.ERROR, (e) => {
+        console.error('[EMBED] Streaming ERROR event:', e);
+        setError(`HEYGEN_ERROR_EVENT: ${e?.detail?.message || e?.message || 'Unknown'}`);
+        setStatus('error');
+      });
+    }
 
     const quality =
       q.startsWith('l') ? (AvatarQuality?.Low || 'low') :
       q.startsWith('h') ? (AvatarQuality?.High || 'high') :
                           (AvatarQuality?.Medium || 'medium');
 
-    await avatar.createStartAvatar({
-      avatarName,
-      quality,
-      welcomeMessage: '',
-    });
-
-    // helper to speak
-    async function speak(text) {
-      if (!text) return;
-      const payload = TaskType
-        ? { text, taskType: TaskType.REPEAT }
-        : { text, taskType: 'REPEAT' };
-      try { await avatar.speak(payload); } catch {}
+    // 3) Start session
+    console.log('[EMBED] createStartAvatar() with:', { avatarName, quality });
+    try {
+      const session = await avatar.createStartAvatar({
+        avatarName,        // make sure this exists on your tenant
+        quality,
+        welcomeMessage: '',
+      });
+      console.log('[EMBED] Session started:', session);
+    } catch (e) {
+      console.error('[EMBED] createStartAvatar FAILED:', e);
+      const msg = e?.message || (typeof e === 'string' ? e : JSON.stringify(e));
+      setError(`HEYGEN_CREATE_FAILED: ${msg}`);
+      setStatus('error');
+      throw e; // surface to outer catch for good measure
     }
 
-    // store on window for quick manual tests
+    // Helper to speak
+    async function speak(text) {
+      if (!text) return;
+      const payload = TaskType ? { text, taskType: TaskType.REPEAT } : { text, taskType: 'REPEAT' };
+      try { await avatar.speak(payload); } catch (e) {
+        console.warn('avatar.speak error:', e?.message || e);
+      }
+    }
     window.__avatarSpeak = speak;
   }, [avatarName, q]);
 
-  // ------- Submit -------
+  // ------------ Submit ------------
   const onSubmit = useCallback(async (e) => {
     e?.preventDefault?.();
     const text = (input || '').trim();
@@ -149,14 +166,13 @@ function PageInner() {
       const id = await ensureChat();
       const reply = await send(id, text);
       push('assistant', reply);
-      // lip-sync: speak exactly reply
       try { await window.__avatarSpeak?.(reply); } catch {}
     } catch (err) {
       push('system', `Message failed${err?.status ? ` (${err.status})` : ''}. Please try again.`);
     }
   }, [input, ensureChat, send, push]);
 
-  // ------- Autostart pipeline -------
+  // ------------ Autostart & cleanup ------------
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -178,16 +194,14 @@ function PageInner() {
     return () => { cancelled = true; stopAvatar(); };
   }, [autostart, begin, ensureChat, stopAvatar]);
 
-  // ------- UI -------
+  // ------------ UI ------------
   return (
     <div style={{
       width: 'min(480px, 95vw)',
       height: 'min(720px, calc(100vh - 48px))',
       display: 'grid',
       gridTemplateRows: '55% 45%',
-      gap: 10,
-      padding: 10,
-      boxSizing: 'border-box',
+      gap: 10, padding: 10, boxSizing: 'border-box',
     }}>
       {/* Video */}
       <div style={{ position:'relative', borderRadius:12, overflow:'hidden', background:'#000' }}>
@@ -199,11 +213,11 @@ function PageInner() {
           style={{ width:'100%', height:'100%', objectFit:'cover', background:'#000' }}
         />
         {status !== 'ready' && (
-          <div style={{
-            position:'absolute', inset:0, display:'grid', placeItems:'center',
-            color:'#fff', background:'rgba(0,0,0,.35)', fontWeight:700
-          }}>
-            {status === 'idle' ? 'Idle' : status === 'connecting' ? 'Connecting…' : 'Error'}
+          <div style={{ position:'absolute', inset:0, display:'grid', placeItems:'center',
+                        color:'#fff', background:'rgba(0,0,0,.35)', fontWeight:700, padding:12, textAlign:'center' }}>
+            {status === 'idle' ? 'Idle' :
+             status === 'connecting' ? 'Connecting…' :
+             `Error${error ? `: ${error}` : ''}`}
           </div>
         )}
       </div>
@@ -249,16 +263,6 @@ function PageInner() {
           >Send</button>
         </form>
       </div>
-
-      {error && (
-        <div style={{
-          position:'absolute', left:10, right:10, bottom:10,
-          background:'#2a1215', border:'1px solid #5c1a1e',
-          color:'#ffd4d6', borderRadius:10, padding:'8px 10px', fontSize:12
-        }}>
-          {error}
-        </div>
-      )}
     </div>
   );
 }
