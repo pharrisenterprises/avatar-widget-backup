@@ -1,29 +1,10 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  async headers() {
-    return [
-      {
-        source: '/(.*)',
-        headers: [
-          {
-            key: 'Content-Security-Policy',
-            value: [
-              "default-src 'self'",
-              "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net https://unpkg.com https://ga.jspm.io https://esm.sh data:",
-              // include both https and wss for LiveKit/HeyGen/Retell
-              "connect-src 'self' https://api.heygen.com https://api.retellai.com https://*.livekit.cloud https://*.heygen.com https://*.retellai.com wss://*.livekit.cloud wss://*.heygen.com wss://*.retellai.com",
-              "img-src 'self' data: blob:",
-              "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
-              "font-src 'self' data: https://fonts.gstatic.com",
-              "media-src 'self' blob: data:",
-              // ⬇️ Changed: allow parents from env (and self)
-              `frame-ancestors 'self' ${process.env.ALLOWED_PARENTS || ''}`,
-            ].join('; ')
-          }
-        ]
-      }
-    ];
-  }
+  // Intentionally do NOT add headers/CSP here.
+  // This widget must be embeddable in an <iframe> on external sites.
+  // If you later add a CSP, do NOT set X-Frame-Options and ensure
+  //   Content-Security-Policy includes: frame-ancestors https://YOUR-SITE ...
+  poweredByHeader: false,
 };
 
 export default nextConfig;
