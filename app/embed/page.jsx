@@ -57,7 +57,7 @@ function PageInner() {
   const [needGesture, setNeedGesture] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
-  const avatarName = (process.env.NEXT_PUBLIC_HEYGEN_AVATAR_ID || '').trim();
+  const idFromEnv = (process.env.NEXT_PUBLIC_HEYGEN_AVATAR_ID || '').trim();
 
   const push = useCallback((role, text) => setMessages((p) => [...p, { role, text }]), []);
 
@@ -129,11 +129,31 @@ function PageInner() {
     setStatus('reconnecting');
   }, []); // begin below
 
+  // Try both shapes: avatarId OR avatarName (avoids 400 from schema mismatch)
+  async function createWithFallback(avatar, AvatarQuality, idString) {
+    // 1) try avatarId
+    try {
+      const payload = { avatarId: idString, quality: AvatarQuality?.High || 'high' };
+      console.log('[HeyGen] createStartAvatar TRY avatarId', payload);
+      await avatar.createStartAvatar(payload);
+      console.log('[HeyGen] createStartAvatar OK with avatarId');
+      return true;
+    } catch (e1) {
+      console.warn('[HeyGen] avatarId failed, will try avatarName', e1?.message || e1);
+    }
+    // 2) try avatarName
+    const payload2 = { avatarName: idString, quality: AvatarQuality?.High || 'high' };
+    console.log('[HeyGen] createStartAvatar TRY avatarName', payload2);
+    await avatar.createStartAvatar(payload2);
+    console.log('[HeyGen] createStartAvatar OK with avatarName');
+    return true;
+  }
+
   const begin = useCallback(async (soft = false) => {
     setError('');
     setStatus(soft ? 'reconnecting' : 'connecting');
 
-    if (!avatarName) { setStatus('error'); setError('MISSING_AVATAR_ID'); throw new Error('MISSING_AVATAR_ID'); }
+    if (!idFromEnv) { setStatus('error'); setError('MISSING_AVATAR_ID'); throw new Error('MISSING_AVATAR_ID'); }
 
     // token
     const tr = await fetch('/api/heygen-token', { cache: 'no-store' });
@@ -171,28 +191,22 @@ function PageInner() {
       scheduleReconnect();
     });
 
-    // *** Minimal, known-good payload (this is the key change) ***
-    const payload = {
-      avatarName,                        // your env var holds the ID/name you used before
-      quality: AvatarQuality?.High || 'high',
-      // no "voice", no "voiceId", no "welcomeMessage"
-    };
-
     try {
-      await avatar.createStartAvatar(payload);
+      await createWithFallback(avatar, AvatarQuality, idFromEnv);
     } catch (e) {
+      console.error('[HeyGen] createStartAvatar FAILED both shapes', e?.message || e);
       setStatus('error');
-      setError(`Avatar start failed`);
+      setError('Avatar start failed (400). Check ID format or tenant support.');
       throw e;
     }
 
-    // Simple speak helper (used by Retell replies)
+    // speak helper
     window.__avatarSpeak = async (text) => {
       if (!text || !avatarRef.current) return;
       try { await avatarRef.current.speak({ text, taskType: 'REPEAT' }); } catch {}
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [avatarName, tryPlay, hideFreeze, showFreeze, scheduleReconnect]);
+  }, [idFromEnv, tryPlay, hideFreeze, showFreeze, scheduleReconnect]);
 
   // Dictation -> Retell -> speak
   const startRec = useCallback(() => {
