@@ -1,151 +1,240 @@
-/* public/embed.js
-   Tiny, dependency-free loader that exposes window.AvatarWidget with open()/close()/mount().
-   It creates a centered overlay that iframes this widget’s /embed page.
-*/
-(() => {
-  const THIS_ORIGIN = (() => {
-    try {
-      const s = document.currentScript;
-      if (!s || !s.src) return '';
-      const m = s.src.match(/^https?:\/\/[^/]+/i);
-      return m ? m[0] : '';
-    } catch { return ''; }
-  })();
+/* public/embed.js */
+(function () {
+  var ORIGIN = (window.AVATAR_WIDGET_ORIGIN || 'https://avatar-widget-backup.vercel.app').replace(/\/$/, '');
 
-  const IFRAME_SRC = `${THIS_ORIGIN}/embed?autostart=1`; // the widget’s embed UI
-  const Z = 999999;
+  var STATE = {
+    mounted: false,
+    mode: 'overlay',          // 'overlay' | 'dock'
+    size: { width: 420, height: 560 },
+    offset: { right: 20, bottom: 88 }, // clears a site FAB
+    overlayEl: null,
+    dockEl: null,
+    targetSel: null,
+    fabEl: null
+  };
 
-  function createStyles() {
-    if (document.getElementById('avatar-widget-styles')) return;
-    const css = `
-      .aw__backdrop {
-        position: fixed; inset: 0; background: rgba(0,0,0,.65);
-        display: flex; align-items: center; justify-content: center;
-        z-index: ${Z};
-        backdrop-filter: blur(2px);
-      }
-      .aw__panel {
-        width: min(92vw, 980px);
-        height: min(88vh, 760px);
-        background: #0b0f1a;
-        border-radius: 16px;
-        border: 1px solid rgba(255,255,255,.08);
-        overflow: hidden;
-        box-shadow: 0 30px 80px rgba(0,0,0,.6);
-        position: relative;
-      }
-      .aw__header {
-        position: absolute; left: 0; right: 0; top: 0; height: 44px;
-        display: flex; align-items: center; justify-content: space-between;
-        padding: 0 12px; color: #e8ecf3; background: rgba(255,255,255,.04);
-        border-bottom: 1px solid rgba(255,255,255,.08);
-      }
-      .aw__close {
-        appearance: none; border: 0; background: transparent; color: #e8ecf3;
-        font-size: 18px; cursor: pointer; padding: 4px 8px; border-radius: 8px;
-      }
-      .aw__iframe {
-        position: absolute; top: 44px; left: 0; right: 0; bottom: 0;
-        width: 100%; height: calc(100% - 44px); border: 0;
-        background: #000;
-      }
-      .aw__fab {
-        position: fixed; right: 18px; bottom: 18px; z-index: ${Z};
-        width: 56px; height: 56px; border-radius: 50%; border: 0;
-        background: #4f46e5; color: #fff; cursor: pointer;
-        box-shadow: 0 10px 30px rgba(0,0,0,.35);
-        display: flex; align-items: center; justify-content: center;
-      }
-      .aw__fab:hover { background: #6366f1; }
-    `;
-    const el = document.createElement('style');
-    el.id = 'avatar-widget-styles';
-    el.textContent = css;
-    document.head.appendChild(el);
+  function css(el, styles){ Object.assign(el.style, styles); return el; }
+  function q(id){ return document.getElementById(id); }
+  function lockScroll(lock){ document.documentElement.style.overflow = lock ? 'hidden' : ''; }
+  function emit(name, detail){ window.dispatchEvent(new CustomEvent('avatar-widget:' + name, { detail })); }
+
+  function makeCloseButton(onClick) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.innerText = '✕';
+    btn.setAttribute('aria-label', 'Close');
+    css(btn, {
+      color:'#fff', background:'transparent', border:'0',
+      width: '32px', height: '32px', borderRadius: '999px',
+      fontSize:'18px', cursor:'pointer'
+    });
+    btn.onclick = onClick;
+    return btn;
   }
 
-  function makeOverlay() {
-    createStyles();
+  function makeIframe() {
+    const iframe = document.createElement('iframe');
+    iframe.title = 'Avatar';
+    // Hints for page layout (handled in /embed)
+    iframe.src = ORIGIN + '/embed?autostart=1&layout=compact&videoFirst=1';
+    iframe.allow = 'camera; microphone; autoplay; clipboard-read; clipboard-write; speaker-selection';
+    iframe.referrerPolicy = 'strict-origin-when-cross-origin';
+    css(iframe, { width:'100%', height:'100%', border:'0' });
+    return iframe;
+  }
 
-    // Avoid duplicates: if already exists, just show it
-    const existing = document.getElementById('aw__root');
-    if (existing) {
-      existing.style.display = 'flex';
-      return existing;
-    }
+  // ---------- OVERLAY ----------
+  function createOverlay() {
+    if (STATE.overlayEl) return STATE.overlayEl;
 
-    const root = document.createElement('div');
-    root.id = 'aw__root';
-    root.className = 'aw__backdrop';
-
-    root.addEventListener('click', (e) => {
-      if (e.target === root) close();
-    });
+    const wrap = document.createElement('div');
+    wrap.id = 'avatar-overlay';
+    wrap.setAttribute('role', 'dialog');
+    wrap.setAttribute('aria-modal', 'true');
+    wrap.tabIndex = -1;
+    css(wrap, { position:'fixed', inset:'0', zIndex:'999999',
+      background:'rgba(0,0,0,.65)', backdropFilter:'blur(2px)', display:'flex',
+      alignItems:'center', justifyContent:'center' });
 
     const panel = document.createElement('div');
-    panel.className = 'aw__panel';
+    css(panel, {
+      width:'min(980px,96vw)', height:'min(720px,86vh)',
+      background:'#0F1220', borderRadius:'16px', boxShadow:'0 20px 60px rgba(0,0,0,.5)',
+      overflow:'hidden', position:'relative'
+    });
 
     const header = document.createElement('div');
-    header.className = 'aw__header';
-    header.innerHTML = `<div style="font-weight:600">Infinity AI Agent</div>`;
-    const btn = document.createElement('button');
-    btn.className = 'aw__close';
-    btn.setAttribute('aria-label', 'Close');
-    btn.textContent = '✕';
-    btn.onclick = () => close();
-    header.appendChild(btn);
+    css(header, {
+      position:'absolute', top:0, left:0, right:0, height:'48px',
+      display:'flex', alignItems:'center', justifyContent:'space-between',
+      padding:'0 12px', color:'#fff', background:'rgba(255,255,255,.05)',
+      borderBottom:'1px solid rgba(255,255,255,.12)', zIndex:'2'
+    });
+    header.innerHTML = '<strong aria-label="Dialog title">Infinity AI Agent</strong>';
+    header.appendChild(makeCloseButton(close));
 
-    const iframe = document.createElement('iframe');
-    iframe.className = 'aw__iframe';
-    iframe.title = 'Avatar';
-    iframe.src = IFRAME_SRC;
-    iframe.allow =
-      'camera; microphone; autoplay; clipboard-read; clipboard-write; speaker-selection';
-    iframe.referrerPolicy = 'no-referrer';
+    const iframe = makeIframe();
+    css(iframe, { marginTop: '48px' });
 
     panel.appendChild(header);
     panel.appendChild(iframe);
-    root.appendChild(panel);
-    document.body.appendChild(root);
-    return root;
+    wrap.appendChild(panel);
+    wrap.addEventListener('click', (e) => { if (e.target === wrap) close(); });
+
+    document.body.appendChild(wrap);
+    lockScroll(true);
+    STATE.overlayEl = wrap;
+    return wrap;
   }
 
+  // ---------- DOCK ----------
+  function createDock() {
+    if (STATE.dockEl) return STATE.dockEl;
+
+    const w = Math.max(300, Math.min(720, +STATE.size.width || 420));
+    const h = Math.max(360, Math.min(900, +STATE.size.height || 560));
+    const right = Math.max(8, +STATE.offset.right || 20);
+    const bottom = Math.max(8, +STATE.offset.bottom || 88);
+
+    const wrap = document.createElement('div');
+    wrap.id = 'avatar-dock';
+    wrap.setAttribute('role', 'dialog');
+    wrap.setAttribute('aria-modal', 'false');
+    css(wrap, {
+      position: 'fixed',
+      zIndex: '999999',
+      right: right + 'px',
+      bottom: bottom + 'px',
+      width: w + 'px',
+      height: h + 'px',
+      borderRadius: '16px',
+      overflow: 'hidden',
+      boxShadow: '0 16px 48px rgba(0,0,0,.45)',
+      background: '#0F1220',
+      transform: 'translateY(24px)',
+      opacity: '0',
+      pointerEvents: 'none',
+      transition: 'transform .18s ease, opacity .18s ease'
+    });
+
+    // mobile responsive
+    const mq = window.matchMedia('(max-width: 640px)');
+    const applyMobile = () => {
+      if (mq.matches) {
+        css(wrap, {
+          right: '12px', left: '12px',
+          bottom: '12px',
+          width: 'auto',
+          height: 'min(78vh, 720px)',
+          borderRadius: '14px'
+        });
+      } else {
+        css(wrap, {
+          right: right + 'px', left: '',
+          bottom: bottom + 'px',
+          width: w + 'px',
+          height: h + 'px',
+          borderRadius: '16px'
+        });
+      }
+    };
+    mq.addEventListener?.('change', applyMobile);
+    applyMobile();
+
+    const header = document.createElement('div');
+    css(header, {
+      position:'absolute', top:0, left:0, right:0, height:'44px',
+      display:'flex', alignItems:'center', justifyContent:'space-between',
+      padding:'0 10px', color:'#fff', background:'rgba(255,255,255,.05)',
+      borderBottom:'1px solid rgba(255,255,255,.12)', zIndex:'2'
+    });
+    header.innerHTML = '<strong style="font-size:13px">Infinity AI Agent</strong>';
+    header.appendChild(makeCloseButton(close));
+
+    const iframe = makeIframe();
+    css(iframe, { marginTop: '44px' });
+
+    wrap.appendChild(header);
+    wrap.appendChild(iframe);
+    document.body.appendChild(wrap);
+    STATE.dockEl = wrap;
+    return wrap;
+  }
+
+  // ---------- API ----------
   function open() {
-    const root = makeOverlay();
-    root.style.display = 'flex';
+    // inline target mode (reserved for future)
+    if (STATE.targetSel) {
+      const target = document.querySelector(STATE.targetSel);
+      if (!target) return console.warn('[AvatarWidget] target not found:', STATE.targetSel);
+      if (!target.querySelector('iframe[data-avatar-inline]')) {
+        const iframe = makeIframe();
+        iframe.setAttribute('data-avatar-inline', '1');
+        target.appendChild(iframe);
+      }
+      emit('opened', { mode: 'inline' });
+      return;
+    }
+
+    if (STATE.mode === 'dock') {
+      const dock = createDock();
+      requestAnimationFrame(() => {
+        css(dock, { transform: 'translateY(0)', opacity: '1', pointerEvents: 'auto' });
+      });
+      emit('opened', { mode: 'dock' });
+      return;
+    }
+
+    // default: overlay
+    if (!q('avatar-overlay')) createOverlay().focus();
+    emit('opened', { mode: 'overlay' });
   }
 
   function close() {
-    const root = document.getElementById('aw__root');
-    if (root) root.style.display = 'none';
+    if (STATE.mode === 'dock' && STATE.dockEl) {
+      const el = STATE.dockEl;
+      css(el, { transform: 'translateY(24px)', opacity: '0', pointerEvents: 'none' });
+      emit('closed', {});
+      return;
+    }
+    if (STATE.overlayEl) {
+      STATE.overlayEl.remove();
+      STATE.overlayEl = null;
+      lockScroll(false);
+      emit('closed', {});
+    }
   }
 
-  function mountFab() {
-    createStyles();
-    if (document.getElementById('aw__fab')) return;
-    const fab = document.createElement('button');
-    fab.id = 'aw__fab';
-    fab.className = 'aw__fab';
-    fab.setAttribute('aria-label', 'Chat with AI');
-    fab.innerHTML =
-      '<svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M7 9h10M7 13h6" stroke="white" stroke-width="2" stroke-linecap="round"/><path d="M21 12a8 8 0 1 1-15.3 3.6L3 21l2.4-2.7A8 8 0 1 1 21 12Z" stroke="white" stroke-opacity=".25" stroke-width="2" fill="none"/></svg>';
-    fab.onclick = () => open();
-    document.body.appendChild(fab);
+  function mount(opts) {
+    if (STATE.mounted) return; // idempotent
+    opts = opts || {};
+    STATE.mode = (opts.mode === 'dock' || opts.mode === 'overlay') ? opts.mode : 'overlay';
+    if (opts.size)   STATE.size   = { ...STATE.size,   ...opts.size };
+    if (opts.offset) STATE.offset = { ...STATE.offset, ...opts.offset };
+    if (typeof opts.target === 'string') STATE.targetSel = opts.target;
+
+    if (opts.floatingButton) {
+      if (!q('avatar-fab')) {
+        const fab = document.createElement('button');
+        fab.id = 'avatar-fab';
+        fab.ariaLabel = 'Chat with the AI agent';
+        fab.type = 'button';
+        fab.innerHTML = '💬';
+        css(fab, {
+          position:'fixed', right:'20px', bottom:'20px', zIndex:'999998',
+          width:'56px', height:'56px', borderRadius:'999px', border:'0',
+          background:'#4F46E5', color:'#fff', fontSize:'22px', cursor:'pointer',
+          boxShadow:'0 10px 30px rgba(0,0,0,.35)'
+        });
+        fab.onclick = open;
+        document.body.appendChild(fab);
+        STATE.fabEl = fab;
+      }
+    }
+
+    STATE.mounted = true;
+    emit('ready', { origin: ORIGIN, version: '1.1.0' });
   }
 
-  // Expose a tiny API
-  window.AvatarWidget = {
-    open,
-    close,
-    mount: mountFab,
-    _origin: THIS_ORIGIN,
-  };
-
-  // Optional: allow sites to trigger with a global event
-  window.addEventListener('avatar-widget:open', open);
-
-  // ESC to close
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') close();
-  });
+  window.AvatarWidget = { open, close, mount, ORIGIN, VERSION: '1.1.0' };
 })();
