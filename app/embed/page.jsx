@@ -1,3 +1,4 @@
+// app/embed/page.jsx
 'use client';
 
 import React, {
@@ -12,58 +13,109 @@ import { useSearchParams } from 'next/navigation';
 import { loadHeygenSdk } from '../lib/loadHeygenSdk';
 
 const LS_CHAT_KEY = 'retell_chat_id';
-const RECONNECT_MS = [1500, 2500, 4000, 6000, 8000];
+
+// Simple SVG icons (inline)
+const Icon = {
+  MicOn:   (props) => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" {...props}>
+      <path d="M12 15a4 4 0 0 0 4-4V7a4 4 0 1 0-8 0v4a4 4 0 0 0 4 4Z" stroke="currentColor" strokeWidth="2"/>
+      <path d="M19 11a7 7 0 0 1-14 0M12 18v4" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+    </svg>
+  ),
+  MicOff:  (props) => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" {...props}>
+      <path d="M1.5 1.5l21 21" stroke="currentColor" strokeWidth="2"/>
+      <path d="M12 15a4 4 0 0 0 4-4V7a4 4 0 0 0-6.8-2.8" stroke="currentColor" strokeWidth="2"/>
+      <path d="M5 11a7 7 0 0 0 11.5 5.3M12 18v4" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+    </svg>
+  ),
+  Volume:  (props) => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" {...props}>
+      <path d="M11 5 6 9H3v6h3l5 4V5Z" stroke="currentColor" strokeWidth="2" strokeLinejoin="round"/>
+      <path d="M15 9a4 4 0 0 1 0 6M18 7a7 7 0 0 1 0 10" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+    </svg>
+  ),
+  Mute:    (props) => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" {...props}>
+      <path d="M1.5 1.5l21 21" stroke="currentColor" strokeWidth="2"/>
+      <path d="M11 5 6 9H3v6h3l5 4V5Z" stroke="currentColor" strokeWidth="2" strokeLinejoin="round"/>
+      <path d="M18 7a7 7 0 0 1 2 5 7 7 0 0 1-1.3 4" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+    </svg>
+  ),
+  Full:    (props) => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" {...props}>
+      <path d="M8 3H3v5M16 3h5v5M3 16v5h5M16 21h5v-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+    </svg>
+  ),
+  Restart: (props) => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" {...props}>
+      <path d="M3 4v6h6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+      <path d="M21 20a9 9 0 1 1-3-13.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+    </svg>
+  ),
+};
+
+// Speech-to-text using Web Speech API (Chrome)
+function makeRecognizer(onText) {
+  const SR = typeof window !== 'undefined'
+    ? (window.SpeechRecognition || window.webkitSpeechRecognition)
+    : null;
+  if (!SR) return null;
+  const rec = new SR();
+  rec.lang = 'en-US';
+  rec.continuous = true;
+  rec.interimResults = false;
+  rec.onresult = (e) => {
+    const i = e.results.length - 1;
+    const txt = e.results[i]?.[0]?.transcript || '';
+    if (txt.trim()) onText(txt.trim());
+  };
+  rec.onerror = () => {}; // swallow errors; we surface status elsewhere
+  return rec;
+}
 
 function PageInner() {
   const sp = useSearchParams();
   const autostart = useMemo(() => (sp?.get('autostart') ?? '1') === '1', [sp]);
-  const compact = useMemo(() => sp?.get('layout') === 'compact', [sp]);
-  const videoFirst = useMemo(() => sp?.get('videoFirst') === '1', [sp]);
+  const layoutCompact = useMemo(() => (sp?.get('layout') ?? 'compact') === 'compact', [sp]);
+  const videoFirst = useMemo(() => (sp?.get('videoFirst') ?? '1') === '1', [sp]);
 
-  // ------- refs
-  const shellRef = useRef(null);
+  const containerRef = useRef(null);
   const videoRef = useRef(null);
-  const canvasRef = useRef(null); // freeze-frame canvas
-  const avatarRef = useRef(null); // HeyGen StreamingAvatar
-  const beginRef = useRef(null);  // to avoid TDZ between scheduleReconnect <-> begin
-  const reconnectIdxRef = useRef(0);
-  const reconnectTimerRef = useRef(null);
-  const keepTryingRef = useRef(true);
+  const avatarRef = useRef(null);
+  const recRef = useRef(null); // SpeechRecognition
 
-  // ------- state
-  const [status, setStatus] = useState('idle'); // idle | connecting | ready | error | reconnecting
+  const [status, setStatus] = useState('idle'); // idle | connecting | ready | error
   const [error, setError] = useState('');
   const [chatId, setChatId] = useState('');
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
-  const [speakerMuted, setSpeakerMuted] = useState(false);
+
+  const [soundOn, setSoundOn] = useState(true);
+  const [micOn, setMicOn] = useState(true);
+  const [needGesture, setNeedGesture] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
   const avatarName = process.env.NEXT_PUBLIC_HEYGEN_AVATAR_ID || '';
 
-  // ------- utils
   const push = useCallback((role, text) => {
     setMessages((p) => [...p, { role, text }]);
   }, []);
 
-  const scrollChatToBottom = useCallback(() => {
-    const scroller = document.getElementById('chat-scroll');
-    if (scroller) scroller.scrollTop = scroller.scrollHeight;
-  }, []);
-  useEffect(() => { scrollChatToBottom(); }, [messages, scrollChatToBottom]);
-
-  // ------- Retell
+  // ------- Retell helpers -------
   const ensureChat = useCallback(async () => {
     if (chatId) return chatId;
     try {
       const s = window.localStorage.getItem(LS_CHAT_KEY);
-      if (s) { setChatId(s); return s; }
+      if (s) {
+        setChatId(s);
+        return s;
+      }
     } catch {}
     const r = await fetch('/api/retell-chat/start', { cache: 'no-store' });
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j?.ok || !j?.chatId) {
-      const code = j?.code || 'RETELL_START_FAILED';
-      const msg = typeof j?.detail === 'string' ? j.detail : '';
-      throw new Error(code + (msg ? `: ${msg}` : ''));
+      throw new Error('CHAT_START_FAILED');
     }
     setChatId(j.chatId);
     try { window.localStorage.setItem(LS_CHAT_KEY, j.chatId); } catch {}
@@ -86,50 +138,31 @@ function PageInner() {
     return j.reply || '';
   }, []);
 
-  // ------- freeze-frame helpers
-  const showFreezeFrame = useCallback(() => {
-    const v = videoRef.current;
-    const c = canvasRef.current;
-    if (!v || !c) return;
-    const w = v.videoWidth || v.clientWidth || 640;
-    const h = v.videoHeight || v.clientHeight || 360;
-    c.width = w; c.height = h;
+  // ------- HeyGen helpers -------
+  const stopAvatar = useCallback(async () => {
     try {
-      const ctx = c.getContext('2d');
-      if (ctx) {
-        ctx.drawImage(v, 0, 0, w, h);
-        c.style.opacity = '1';
-        c.style.visibility = 'visible';
-      }
+      const a = avatarRef.current;
+      if (a?.stopAvatar) await a.stopAvatar();
     } catch {}
+    avatarRef.current = null;
+    if (videoRef.current) videoRef.current.srcObject = null;
   }, []);
 
-  const hideFreezeFrame = useCallback(() => {
-    const c = canvasRef.current;
-    if (c) { c.style.opacity = '0'; c.style.visibility = 'hidden'; }
-  }, []);
+  const tryPlay = useCallback(async () => {
+    try {
+      if (!videoRef.current) return;
+      if (soundOn) videoRef.current.muted = false;
+      await videoRef.current.play();
+      setNeedGesture(false);
+    } catch {
+      // Autoplay blocked — show “tap to enable” shim
+      setNeedGesture(true);
+    }
+  }, [soundOn]);
 
-  // ------- reconnect orchestration (defined BEFORE begin; uses beginRef)
-  const scheduleReconnect = useCallback(() => {
-    if (!keepTryingRef.current) return;
-    setStatus('reconnecting');
-    showFreezeFrame();
-    const idx = Math.min(reconnectIdxRef.current, RECONNECT_MS.length - 1);
-    const delay = RECONNECT_MS[idx];
-    reconnectIdxRef.current = idx + 1;
-
-    clearTimeout(reconnectTimerRef.current);
-    reconnectTimerRef.current = setTimeout(async () => {
-      const fn = beginRef.current;
-      if (!fn) return; // should never happen
-      try { await fn(true); } catch { scheduleReconnect(); }
-    }, delay);
-  }, [showFreezeFrame]);
-
-  // ------- HeyGen: begin (defined AFTER scheduleReconnect; calls it in events)
-  const begin = useCallback(async (soft = false) => {
+  const begin = useCallback(async () => {
+    setStatus('connecting');
     setError('');
-    setStatus(soft ? 'reconnecting' : 'connecting');
 
     // token
     const tr = await fetch('/api/heygen-token', { cache: 'no-store' });
@@ -139,41 +172,34 @@ function PageInner() {
 
     const sdk = await loadHeygenSdk();
     if (!sdk?.StreamingAvatar) throw new Error('SDK');
+
     const { StreamingAvatar, StreamingEvents, AvatarQuality, TaskType } = sdk;
-
-    // stop previous without blanking frame
-    try { await avatarRef.current?.stopAvatar?.(); } catch {}
-    avatarRef.current = null;
-
     const avatar = new StreamingAvatar({ token, debug: false });
     avatarRef.current = avatar;
 
     avatar.on(StreamingEvents.STREAM_READY, (evt) => {
       const stream = evt?.detail;
-      const v = videoRef.current;
-      if (v && stream instanceof MediaStream) {
-        v.srcObject = stream;
-        v.muted = speakerMuted;
-        v.onloadedmetadata = () => {
-          v.play().catch(() => {});
-          hideFreezeFrame();
-          setStatus('ready');
-          reconnectIdxRef.current = 0;
-        };
+      if (videoRef.current && stream instanceof MediaStream) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.playsInline = true;
+        // try to unmute (play) immediately
+        tryPlay();
+        setStatus('ready');
       }
     });
 
     avatar.on(StreamingEvents.STREAM_DISCONNECTED, () => {
-      scheduleReconnect();
+      if (videoRef.current) videoRef.current.srcObject = null;
+      setStatus('idle');
     });
 
-    const quality = AvatarQuality?.Medium || 'medium';
     await avatar.createStartAvatar({
       avatarName,
-      quality,
+      quality: AvatarQuality?.High || 'high',
       welcomeMessage: '',
     });
 
+    // helper to speak
     async function speak(text) {
       if (!text) return;
       const payload = TaskType
@@ -181,23 +207,35 @@ function PageInner() {
         : { text, taskType: 'REPEAT' };
       try { await avatar.speak(payload); } catch {}
     }
+    // store on window for quick manual tests
     window.__avatarSpeak = speak;
-  }, [avatarName, hideFreezeFrame, scheduleReconnect, speakerMuted]);
+  }, [avatarName, tryPlay]);
 
-  // bind begin to ref (breaks any circular references safely)
-  useEffect(() => { beginRef.current = begin; }, [begin]);
+  // Speech recognition
+  const startRec = useCallback(() => {
+    if (recRef.current) return; // already running
+    const rec = makeRecognizer(async (txt) => {
+      push('user', txt);
+      try {
+        const id = await ensureChat();
+        const reply = await send(id, txt);
+        push('assistant', reply);
+        try { await window.__avatarSpeak?.(reply); } catch {}
+      } catch (err) {
+        push('system', `Message failed${err?.status ? ` (${err.status})` : ''}. Please try again.`);
+      }
+    });
+    if (!rec) return; // not supported
+    recRef.current = rec;
+    try { rec.start(); } catch {}
+  }, [ensureChat, send, push]);
 
-  // ------- mic permission
-  const ensureMicPermission = useCallback(async () => {
-    try {
-      const s = await navigator.mediaDevices.getUserMedia({ audio: true });
-      s.getTracks().forEach((t) => t.stop());
-    } catch {
-      // user declined — text still works; audio may require click
-    }
+  const stopRec = useCallback(() => {
+    try { recRef.current?.stop?.(); } catch {}
+    recRef.current = null;
   }, []);
 
-  // ------- submit
+  // ------- Submit -------
   const onSubmit = useCallback(async (e) => {
     e?.preventDefault?.();
     const text = (input || '').trim();
@@ -214,179 +252,187 @@ function PageInner() {
     }
   }, [input, ensureChat, send, push]);
 
-  // ------- lifecycle
+  // ------- Autostart pipeline -------
   useEffect(() => {
-    keepTryingRef.current = true;
+    let cancelled = false;
     (async () => {
       try {
-        const s = window.localStorage.getItem(LS_CHAT_KEY);
-        if (s) setChatId(s);
-      } catch {}
-      if (!autostart) return;
-      await ensureMicPermission();
-      try {
+        try {
+          const s = window.localStorage.getItem(LS_CHAT_KEY);
+          if (s) setChatId(s);
+        } catch {}
+        if (!autostart) return;
         await begin();
-        await ensureChat();
+        if (!cancelled) await ensureChat();
+        if (!cancelled && micOn) startRec();
       } catch (e) {
-        setError(e?.message || 'Startup error');
-        setStatus('error');
+        if (!cancelled) {
+          setError(e?.message || 'Startup error');
+          setStatus('error');
+        }
       }
     })();
-    return () => {
-      keepTryingRef.current = false;
-      clearTimeout(reconnectTimerRef.current);
-      try { avatarRef.current?.stopAvatar?.(); } catch {}
-    };
-  }, [autostart, begin, ensureChat, ensureMicPermission]);
+    return () => { cancelled = true; stopRec(); stopAvatar(); };
+  }, [autostart, begin, ensureChat, stopAvatar, micOn, startRec]);
 
-  // ------- controls
-  const toggleSpeaker = useCallback(async () => {
-    const v = videoRef.current;
-    if (!v) return;
-    const next = !speakerMuted;
-    setSpeakerMuted(next);
-    try { v.muted = next; await v.play().catch(() => {}); } catch {}
-  }, [speakerMuted]);
+  // auto-scroll chat
+  const chatEndRef = useRef(null);
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }, [messages.length]);
 
-  const restart = useCallback(async () => {
-    clearTimeout(reconnectTimerRef.current);
-    reconnectIdxRef.current = 0;
-    showFreezeFrame();
-    try { await beginRef.current?.(true); } catch { scheduleReconnect(); }
-  }, [scheduleReconnect, showFreezeFrame]);
+  // ------- UI handlers -------
+  const onToggleSound = useCallback(async () => {
+    setSoundOn((s) => !s);
+    if (videoRef.current) {
+      videoRef.current.muted = soundOn; // toggle
+      try { await videoRef.current.play(); } catch {}
+    }
+    setNeedGesture(false);
+  }, [soundOn]);
 
-  const fullscreen = useCallback(async () => {
-    const el = shellRef.current;
+  const onToggleMic = useCallback(() => {
+    setMicOn((m) => !m);
+    if (micOn) stopRec(); else startRec();
+  }, [micOn, startRec, stopRec]);
+
+  const onRestart = useCallback(async () => {
+    try { window.localStorage.removeItem(LS_CHAT_KEY); } catch {}
+    setChatId('');
+    setMessages([]);
+    await stopAvatar();
+    await begin();
+    await ensureChat();
+    if (micOn) startRec();
+  }, [begin, ensureChat, micOn, startRec, stopAvatar]);
+
+  const onFullscreen = useCallback(async () => {
+    const el = containerRef.current;
     if (!el) return;
     try {
-      if (document.fullscreenElement) await document.exitFullscreen();
-      else await el.requestFullscreen();
+      if (!document.fullscreenElement) {
+        await el.requestFullscreen?.();
+        setIsFullscreen(true);
+      } else {
+        await document.exitFullscreen?.();
+        setIsFullscreen(false);
+      }
     } catch {}
   }, []);
 
-  const rootClass = [
-    'avatar-shell',
-    compact ? 'layout-compact' : '',
-    videoFirst ? 'video-first' : '',
-  ].filter(Boolean).join(' ');
+  const onGestureEnable = useCallback(async () => {
+    setNeedGesture(false);
+    if (!videoRef.current) return;
+    videoRef.current.muted = false;
+    try { await videoRef.current.play(); } catch {}
+  }, []);
 
+  // ------- Layout classes -------
+  const shellClass = [
+    'avatar-shell',
+    layoutCompact ? 'layout-compact' : '',
+    videoFirst ? 'video-first' : ''
+  ].join(' ').trim();
+
+  // ------- Render -------
   return (
     <div
-      ref={shellRef}
-      className={rootClass}
+      ref={containerRef}
+      className={shellClass}
       style={{
-        width: 'min(980px, 96vw)',
-        height: 'min(720px, 86vh)',
+        width: 'min(480px, 95vw)',
+        height: 'min(720px, calc(100vh - 24px))',
         display: 'grid',
-        gridTemplateRows: '1fr 1fr', // 50/50 split
-        gap: 12,
-        padding: 12,
+        gridTemplateRows: '55% 45%', // video / chat
+        gap: 10,
+        padding: 10,
         boxSizing: 'border-box',
-        position: 'relative',
+        background: '#0f1220',
+        color: '#e9ecf1',
+        borderRadius: 12,
       }}
     >
-      {/* VIDEO */}
+      {/* Video with controls overlay */}
       <div style={{ position: 'relative', borderRadius: 12, overflow: 'hidden', background: '#000' }}>
-        {/* controls */}
-        <div style={{
-          position: 'absolute', top: 10, left: 10, display: 'flex', gap: 8, zIndex: 3,
-          background: 'rgba(15,18,32,.55)', padding: '6px 8px', borderRadius: 10, backdropFilter: 'blur(4px)'
-        }}>
-          {/* mic indicator */}
-          <button title="Microphone" style={iconBtnStyle} aria-label="Mic">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-              <path d="M12 14a3 3 0 0 0 3-3V7a3 3 0 0 0-6 0v4a3 3 0 0 0 3 3Z" stroke="#fff" strokeWidth="2"/>
-              <path d="M5 11a7 7 0 0 0 14 0" stroke="#fff" strokeWidth="2"/>
-            </svg>
-          </button>
-          {/* speaker */}
-          <button onClick={toggleSpeaker} title={speakerMuted ? 'Unmute speaker' : 'Mute speaker'} style={iconBtnStyle} aria-label="Speaker">
-            {speakerMuted ? (
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-                <path d="M4 9v6h4l5 4V5L8 9H4Z" stroke="#fff" strokeWidth="2"/>
-                <path d="m19 5-14 14" stroke="#fff" strokeWidth="2"/>
-              </svg>
-            ) : (
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-                <path d="M4 9v6h4l5 4V5L8 9H4Z" stroke="#fff" strokeWidth="2"/>
-                <path d="M16 7a5 5 0 0 1 0 10" stroke="#fff" strokeWidth="2"/>
-              </svg>
-            )}
-          </button>
-          {/* restart */}
-          <button onClick={restart} title="Restart session" style={iconBtnStyle} aria-label="Restart">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-              <path d="M3 12a9 9 0 1 0 3-6.7" stroke="#fff" strokeWidth="2"/>
-              <path d="M3 5v4h4" stroke="#fff" strokeWidth="2"/>
-            </svg>
-          </button>
-          {/* fullscreen */}
-          <button onClick={fullscreen} title="Fullscreen" style={iconBtnStyle} aria-label="Fullscreen">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-              <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" stroke="#fff" strokeWidth="2"/>
-            </svg>
-          </button>
-        </div>
-
-        {/* freeze-frame */}
-        <canvas
-          ref={canvasRef}
-          style={{
-            position: 'absolute', inset: 0, width: '100%', height: '100%',
-            objectFit: 'cover', transition: 'opacity .2s', opacity: 0, visibility: 'hidden', zIndex: 1
-          }}
-        />
-
-        {/* live video */}
         <video
           ref={videoRef}
           playsInline
           autoPlay
-          muted={speakerMuted}
-          className="avatar-video"
-          style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+          muted={!soundOn}
+          style={{ width: '100%', height: '100%', objectFit: 'cover', background: '#000' }}
         />
 
-        {/* status badge */}
+        {/* Status veil */}
         {status !== 'ready' && (
           <div style={{
-            position: 'absolute', right: 10, top: 10, zIndex: 3,
-            background: 'rgba(0,0,0,.5)', color: '#fff', padding: '6px 10px',
-            borderRadius: 10, fontWeight: 700
+            position: 'absolute', inset: 0, display: 'grid', placeItems: 'center',
+            color: '#fff', background: 'rgba(0,0,0,.35)', fontWeight: 700
           }}>
-            {status === 'connecting' ? 'Connecting…'
-              : status === 'reconnecting' ? 'Reconnecting…'
-              : status === 'error' ? 'Error' : 'Idle'}
+            {status === 'idle' ? 'Idle' : status === 'connecting' ? 'Connecting…' : 'Error'}
           </div>
         )}
+
+        {/* “Tap to enable sound” if autoplay blocked */}
+        {needGesture && (
+          <button
+            onClick={onGestureEnable}
+            style={{
+              position: 'absolute', inset: 0, background: 'rgba(0,0,0,.55)',
+              color: '#fff', fontWeight: 700, border: '0', cursor: 'pointer'
+            }}
+          >
+            Tap to enable sound
+          </button>
+        )}
+
+        {/* Controls row */}
+        <div style={{
+          position:'absolute', top:8, right:8, display:'flex', gap:6,
+          background:'rgba(15,18,32,.55)', padding:'6px 8px',
+          border:'1px solid rgba(255,255,255,.12)', borderRadius:10
+        }}>
+          <button
+            title={micOn ? 'Mic on — click to stop listening' : 'Mic off — click to start listening'}
+            onClick={onToggleMic}
+            style={btnStyle}
+          >
+            {micOn ? <Icon.MicOn/> : <Icon.MicOff/>}
+          </button>
+          <button
+            title={soundOn ? 'Mute' : 'Unmute'}
+            onClick={onToggleSound}
+            style={btnStyle}
+          >
+            {soundOn ? <Icon.Volume/> : <Icon.Mute/>}
+          </button>
+          <button title="Restart conversation" onClick={onRestart} style={btnStyle}><Icon.Restart/></button>
+          <button title={isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'} onClick={onFullscreen} style={btnStyle}><Icon.Full/></button>
+        </div>
       </div>
 
-      {/* CHAT */}
+      {/* Chat */}
       <div style={{
         borderRadius: 12, overflow: 'hidden', border: '1px solid #1f2430',
-        background: '#0f1220', color: '#e9ecf1', display: 'grid',
-        gridTemplateRows: '1fr auto', minHeight: 180
+        background: '#0f1220', display: 'grid', gridTemplateRows: '1fr auto'
       }}>
-        <div id="chat-scroll" style={{ padding: '10px 12px', overflowY: 'auto', fontSize: 14 }}>
+        <div style={{ padding: '10px 12px', overflowY: 'auto', fontSize: 14 }}>
           {messages.length === 0 ? (
             <div style={{ opacity: .75 }}>
               Talk to the agent — we’re listening. You can also type below.
             </div>
-          ) : messages.map((m, i) => (
+          ) : messages.map((m,i) => (
             <div key={i} style={{ marginBottom: 10 }}>
               <div style={{
                 fontWeight: 700, fontSize: 12,
-                color: m.role === 'user' ? '#60a5fa'
-                  : m.role === 'assistant' ? '#34d399'
-                  : '#e879f9'
+                color: m.role==='user' ? '#60a5fa' : m.role==='assistant' ? '#34d399' : '#e879f9'
               }}>
-                {m.role === 'assistant' ? 'Assistant' : m.role === 'system' ? 'System' : 'User'}
+                {m.role === 'assistant' ? 'Assistant' : m.role[0].toUpperCase()+m.role.slice(1)}
               </div>
               <div style={{ whiteSpace: 'pre-wrap' }}>{m.text}</div>
             </div>
           ))}
+          <div ref={chatEndRef} />
         </div>
-
         <form onSubmit={onSubmit} style={{ display: 'flex', gap: 8, padding: 10, borderTop: '1px solid #1f2430' }}>
           <input
             value={input}
@@ -411,7 +457,7 @@ function PageInner() {
 
       {error && (
         <div style={{
-          position: 'absolute', left: 16, right: 16, bottom: 16,
+          position: 'absolute', left: 10, right: 10, bottom: 10,
           background: '#2a1215', border: '1px solid #5c1a1e',
           color: '#ffd4d6', borderRadius: 10, padding: '8px 10px', fontSize: 12
         }}>
@@ -422,22 +468,23 @@ function PageInner() {
   );
 }
 
-const iconBtnStyle = {
-  width: 32,
+const btnStyle = {
+  background: 'transparent',
+  border: '1px solid rgba(255,255,255,.12)',
+  color: '#fff',
+  width: 36,
   height: 32,
   display: 'grid',
   placeItems: 'center',
   borderRadius: 8,
-  background: 'transparent',
-  border: '1px solid rgba(255,255,255,.2)',
-  color: '#fff',
   cursor: 'pointer'
 };
 
 export default function EmbedPage() {
   return (
-    <Suspense fallback={<div style={{ padding: 16 }}>Loading…</div>}>
+    <Suspense fallback={<div style={{ padding: 16, color: '#e9ecf1' }}>Loading…</div>}>
       <PageInner />
     </Suspense>
   );
 }
+
