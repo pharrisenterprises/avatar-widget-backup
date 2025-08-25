@@ -1,4 +1,3 @@
-// app/embed/page.jsx
 'use client';
 
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -7,7 +6,7 @@ import { loadHeygenSdk } from '../lib/loadHeygenSdk';
 
 const LS_CHAT_KEY = 'retell_chat_id';
 
-// icons
+// Small inline icons
 const Icon = {
   MicOn: (p) => (<svg width="18" height="18" viewBox="0 0 24 24" fill="none" {...p}><path d="M12 15a4 4 0 0 0 4-4V7a4 4 0 1 0-8 0v4a4 4 0 0 0 4 4Z" stroke="currentColor" strokeWidth="2"/><path d="M19 11a7 7 0 0 1-14 0M12 18v4" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/></svg>),
   MicOff:(p) => (<svg width="18" height="18" viewBox="0 0 24 24" fill="none" {...p}><path d="M1.5 1.5l21 21" stroke="currentColor" strokeWidth="2"/><path d="M12 15a4 4 0 0 0 4-4V7a4 4 0 0 0-6.8-2.8" stroke="currentColor" strokeWidth="2"/><path d="M5 11a7 7 0 0 0 11.5 5.3M12 18v4" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/></svg>),
@@ -17,7 +16,7 @@ const Icon = {
   Restart:(p) => (<svg width="18" height="18" viewBox="0 0 24 24" fill="none" {...p}><path d="M3 4v6h6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/><path d="M21 20a9 9 0 1 1-3-13.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/></svg>),
 };
 
-// Web Speech API for dictation -> Retell
+// Web Speech (dictation -> Retell)
 function makeRecognizer(onText) {
   const SR = typeof window !== 'undefined'
     ? (window.SpeechRecognition || window.webkitSpeechRecognition)
@@ -42,24 +41,23 @@ function PageInner() {
 
   const containerRef = useRef(null);
   const videoRef = useRef(null);
-  const canvasRef = useRef(null); // freeze-frame canvas
+  const canvasRef = useRef(null); // freeze-frame
   const avatarRef = useRef(null);
   const recRef = useRef(null);
   const reconnectRef = useRef({ timer: null, tries: 0 });
 
-  const [status, setStatus] = useState('idle');      // idle | connecting | ready | error | reconnecting
-  const [error, setError] = useState('');
-  const [chatId, setChatId] = useState('');
+  const [status, setStatus]     = useState('idle');   // idle | connecting | ready | error | reconnecting
+  const [error, setError]       = useState('');
+  const [chatId, setChatId]     = useState('');
   const [messages, setMessages] = useState([]);
-  const [input, setInput] = useState('');
+  const [input, setInput]       = useState('');
 
-  const [soundOn, setSoundOn] = useState(true);
-  const [micOn, setMicOn] = useState(true);
+  const [soundOn, setSoundOn]   = useState(true);
+  const [micOn, setMicOn]       = useState(true);
   const [needGesture, setNeedGesture] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
-  const avatarIdentifier = (process.env.NEXT_PUBLIC_HEYGEN_AVATAR_ID || '').trim();
-  const voiceId = (process.env.NEXT_PUBLIC_HEYGEN_VOICE_ID || '').trim();
+  const avatarName = (process.env.NEXT_PUBLIC_HEYGEN_AVATAR_ID || '').trim();
 
   const push = useCallback((role, text) => setMessages((p) => [...p, { role, text }]), []);
 
@@ -87,7 +85,7 @@ function PageInner() {
     return j.reply || '';
   }, []);
 
-  // ---------- Freeze frame helpers ----------
+  // ---------- Freeze frame ----------
   const showFreeze = useCallback(() => {
     try {
       const v = videoRef.current, c = canvasRef.current;
@@ -115,7 +113,7 @@ function PageInner() {
       await v.play();
       setNeedGesture(false);
     } catch {
-      setNeedGesture(true); // browser blocked autoplay
+      setNeedGesture(true); // autoplay blocked
     }
   }, [soundOn]);
 
@@ -135,10 +133,7 @@ function PageInner() {
     setError('');
     setStatus(soft ? 'reconnecting' : 'connecting');
 
-    if (!avatarIdentifier) {
-      setStatus('error'); setError('MISSING_AVATAR_ID');
-      throw new Error('MISSING_AVATAR_ID');
-    }
+    if (!avatarName) { setStatus('error'); setError('MISSING_AVATAR_ID'); throw new Error('MISSING_AVATAR_ID'); }
 
     // token
     const tr = await fetch('/api/heygen-token', { cache: 'no-store' });
@@ -148,7 +143,7 @@ function PageInner() {
 
     const sdk = await loadHeygenSdk();
     if (!sdk?.StreamingAvatar) throw new Error('SDK');
-    const { StreamingAvatar, StreamingEvents, AvatarQuality, TaskType } = sdk;
+    const { StreamingAvatar, StreamingEvents, AvatarQuality } = sdk;
 
     // stop any prior
     try { await avatarRef.current?.stopAvatar?.(); } catch {}
@@ -176,42 +171,28 @@ function PageInner() {
       scheduleReconnect();
     });
 
-    const quality = AvatarQuality?.High || 'high';
-    console.log('[EMBED] createStartAvatar payload baseline:', { avatarIdentifier, quality, voiceId });
+    // *** Minimal, known-good payload (this is the key change) ***
+    const payload = {
+      avatarName,                        // your env var holds the ID/name you used before
+      quality: AvatarQuality?.High || 'high',
+      // no "voice", no "voiceId", no "welcomeMessage"
+    };
 
-    let started = false; let lastErr;
-
-    async function tryStart(payload) {
-      try {
-        await avatar.createStartAvatar(payload);
-        started = true;
-      } catch (e) {
-        lastErr = e;
-        console.warn('[EMBED] createStartAvatar failed:', e?.message || e, payload);
-      }
-    }
-
-    const common = { quality, welcomeMessage: '' };
-    const withVoice = voiceId ? { voice: voiceId, voiceId } : {};
-
-    await tryStart({ avatarName: avatarIdentifier, ...withVoice, ...common });
-    if (!started) await tryStart({ avatarId: avatarIdentifier, ...withVoice, ...common });
-
-    if (!started) {
+    try {
+      await avatar.createStartAvatar(payload);
+    } catch (e) {
       setStatus('error');
-      const msg = (lastErr && (lastErr.message || lastErr.toString())) || 'START_FAILED';
-      setError(`Avatar start failed: ${msg}`);
-      throw lastErr || new Error(msg);
+      setError(`Avatar start failed`);
+      throw e;
     }
 
-    async function speak(text) {
-      if (!text) return;
-      const payload = TaskType ? { text, taskType: TaskType.REPEAT } : { text, taskType: 'REPEAT' };
-      try { await avatar.speak(payload); } catch {}
-    }
-    window.__avatarSpeak = speak;
+    // Simple speak helper (used by Retell replies)
+    window.__avatarSpeak = async (text) => {
+      if (!text || !avatarRef.current) return;
+      try { await avatarRef.current.speak({ text, taskType: 'REPEAT' }); } catch {}
+    };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [avatarIdentifier, voiceId, tryPlay, hideFreeze, showFreeze, scheduleReconnect]);
+  }, [avatarName, tryPlay, hideFreeze, showFreeze, scheduleReconnect]);
 
   // Dictation -> Retell -> speak
   const startRec = useCallback(() => {
@@ -356,7 +337,7 @@ function PageInner() {
           </button>
         )}
 
-        {/* Overlay controls */}
+        {/* Controls */}
         <div style={{ position:'absolute', top:8, right:8, display:'flex', gap:6, background:'rgba(15,18,32,.55)', padding:'6px 8px', border:'1px solid rgba(255,255,255,.12)', borderRadius:10 }}>
           <button title={micOn ? 'Mic on — click to stop listening' : 'Mic off — click to start listening'} onClick={onToggleMic} style={btnStyle}>
             {micOn ? <Icon.MicOn/> : <Icon.MicOff/>}
