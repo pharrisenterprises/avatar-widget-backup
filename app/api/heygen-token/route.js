@@ -2,25 +2,10 @@
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-function corsHeaders(origin) {
-  const allow = process.env.ALLOWED_ORIGINS || '*';
-  const allowOrigin =
-    allow === '*'
-      ? '*'
-      : allow.split(',').map(s => s.trim()).includes(origin)
-      ? origin
-      : '';
-  return {
-    'Access-Control-Allow-Origin': allowOrigin || '*',
-    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-    'Access-Control-Max-Age': '86400',
-  };
-}
+import { corsHeaders, preflight } from '../_cors';
 
 export async function OPTIONS(req) {
-  const h = corsHeaders(req.headers.get('origin') || '');
-  return new Response(null, { status: 204, headers: h });
+  return preflight(req);
 }
 
 export async function GET(req) {
@@ -36,7 +21,7 @@ export async function GET(req) {
   }
 
   try {
-    // Preferred: tenant token endpoint (no secret leak)
+    // Preferred: tenant token endpoint
     const r = await fetch('https://api.heygen.com/v1/streaming.token', {
       method: 'POST',
       headers: {
@@ -68,8 +53,9 @@ export async function GET(req) {
       { headers: { ...h, 'Cache-Control': 'no-store' } },
     );
   } catch {
-    // TEMPORARY last-ditch fallback (only if you *must*): return the API key as “token”.
-    // SECURITY: remove this once /v1/streaming.token works reliably for your tenant.
+    // NOTE: If your tenant doesn’t support the endpoint above yet,
+    // you could temporarily return the API key as the token.
+    // SECURITY: comment remains for reference—don’t enable in prod.
     // return Response.json({ ok: true, token: process.env.HEYGEN_API_KEY }, { headers: { ...h, 'Cache-Control': 'no-store' } });
 
     return Response.json(
