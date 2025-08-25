@@ -1,4 +1,3 @@
-// app/embed/page.jsx
 'use client';
 
 import React, {
@@ -17,23 +16,26 @@ const LS_CHAT_KEY = 'retell_chat_id';
 function PageInner() {
   const sp = useSearchParams();
   const autostart = useMemo(() => (sp?.get('autostart') ?? '1') === '1', [sp]);
-  const qualityParam = (sp?.get('q') || '').toLowerCase();
+  const q = (sp?.get('q') || 'medium').toLowerCase();
 
-  // ---- Refs / state ----
-  const containerRef = useRef(null);
   const videoRef = useRef(null);
   const avatarRef = useRef(null);
+  const chatScrollRef = useRef(null);
+  const firstGestureDone = useRef(false);
+
+  // Web Speech API
+  const recognitionRef = useRef(null);
 
   const [status, setStatus] = useState('idle'); // idle | connecting | ready | error
   const [error, setError] = useState('');
   const [chatId, setChatId] = useState('');
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
-  const [chatOpen, setChatOpen] = useState(false);
-  const [isFullscreen, setIsFullscreen] = useState(false);
-  const [isMuted, setIsMuted] = useState(true); // required for autoplay; we unmute on gesture
 
-  const scrollPinRef = useRef(null); // auto-scroll anchor
+  // UI toggles
+  const [isChatOpen, setIsChatOpen] = useState(false);
+  const [micOn, setMicOn] = useState(true);
+  const [speakerMuted, setSpeakerMuted] = useState(false);
 
   const avatarName = process.env.NEXT_PUBLIC_HEYGEN_AVATAR_ID || '';
 
@@ -41,11 +43,15 @@ function PageInner() {
     setMessages((p) => [...p, { role, text }]);
   }, []);
 
-  // ---- Retell helpers ----
+  // auto-scroll chat to latest
+  useEffect(() => {
+    const el = chatScrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [messages]);
+
+  // ------- Retell helpers -------
   const ensureChat = useCallback(async () => {
     if (chatId) return chatId;
-
-    // resume if present
     try {
       const s = window.localStorage.getItem(LS_CHAT_KEY);
       if (s) {
@@ -53,7 +59,6 @@ function PageInner() {
         return s;
       }
     } catch {}
-
     const r = await fetch('/api/retell-chat/start', { cache: 'no-store' });
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j?.ok || !j?.chatId) {
@@ -80,7 +85,7 @@ function PageInner() {
     return j.reply || '';
   }, []);
 
-  // ---- HeyGen helpers ----
+  // ------- HeyGen helpers -------
   const stopAvatar = useCallback(async () => {
     try {
       const a = avatarRef.current;
@@ -88,25 +93,22 @@ function PageInner() {
     } catch {}
     avatarRef.current = null;
     if (videoRef.current) videoRef.current.srcObject = null;
-    setStatus('idle');
   }, []);
 
   const begin = useCallback(async () => {
     setStatus('connecting');
     setError('');
 
-    // 1) token
+    // token
     const tr = await fetch('/api/heygen-token', { cache: 'no-store' });
     const tj = await tr.json().catch(() => ({}));
     const token = tj?.token || tj?.data?.token || tj?.accessToken || '';
-    if (!token) throw new Error('TOKEN_MISSING');
+    if (!token) throw new Error('TOKEN');
 
-    // 2) SDK
     const sdk = await loadHeygenSdk();
-    if (!sdk?.StreamingAvatar) throw new Error('SDK_MISSING');
-    const { StreamingAvatar, StreamingEvents, AvatarQuality, TaskType } = sdk;
+    if (!sdk?.StreamingAvatar) throw new Error('SDK');
 
-    // 3) start
+    const { StreamingAvatar, StreamingEvents, AvatarQuality, TaskType } = sdk;
     const avatar = new StreamingAvatar({ token, debug: false });
     avatarRef.current = avatar;
 
@@ -114,8 +116,9 @@ function PageInner() {
       const stream = evt?.detail;
       if (videoRef.current && stream instanceof MediaStream) {
         videoRef.current.srcObject = stream;
-        videoRef.current.muted = isMuted; // muted until user gesture
+        videoRef.current.muted = speakerMuted; // reflect toggle
         videoRef.current.onloadedmetadata = () => {
+          // attempt playback (will succeed after first user gesture)
           videoRef.current.play().catch(() => {});
           setStatus('ready');
         };
@@ -128,9 +131,9 @@ function PageInner() {
     });
 
     const quality =
-      qualityParam.startsWith('l') ? (AvatarQuality?.Low || 'low') :
-      qualityParam.startsWith('h') ? (AvatarQuality?.High || 'high') :
-                                     (AvatarQuality?.Medium || 'medium');
+      q.startsWith('l') ? (AvatarQuality?.Low || 'low') :
+      q.startsWith('h') ? (AvatarQuality?.High || 'high') :
+                          (AvatarQuality?.Medium || 'medium');
 
     await avatar.createStartAvatar({
       avatarName,
@@ -138,7 +141,7 @@ function PageInner() {
       welcomeMessage: '',
     });
 
-    // expose speak helper
+    // expose speak() for internal use
     async function speak(text) {
       if (!text) return;
       const payload = TaskType
@@ -147,30 +150,119 @@ function PageInner() {
       try { await avatar.speak(payload); } catch {}
     }
     window.__avatarSpeak = speak;
-  }, [avatarName, isMuted, qualityParam]);
+  }, [avatarName, q, speakerMuted]);
 
-  // ---- Submit ----
+  // ------- Mic (browser SpeechRecognition) -------
+  const hasSR = () =>
+    typeof window !== 'undefined' &&
+    (window.SpeechRecognition || window.webkitSpeechRecognition);
+
+  const startMic = useCallback(() => {
+    if (!hasSR()) {
+      setError('Voice input not supported on this browser.');
+      setMicOn(false);
+      return;
+    }
+    try {
+      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+      const rec = new SR();
+      rec.continuous = true;
+      rec.interimResults = true;
+      rec.lang = 'en-US';
+
+      rec.onresult = async (e) => {
+        // Show interim in the input box
+        let interim = '';
+        for (let i = e.resultIndex; i < e.results.length; i++) {
+          const res = e.results[i];
+          if (res.isFinal) {
+            const finalTxt = res[0].transcript.trim();
+            if (finalTxt) {
+              push('user', finalTxt);
+              try {
+                const id = await ensureChat();
+                const reply = await send(id, finalTxt);
+                push('assistant', reply);
+                try { await window.__avatarSpeak?.(reply); } catch {}
+              } catch (err) {
+                push('system', `Message failed${err?.status ? ` (${err.status})` : ''}. Please try again.`);
+              }
+            }
+          } else {
+            interim += res[0].transcript;
+          }
+        }
+        setInput(interim);
+      };
+
+      rec.onend = () => {
+        // keep listening while micOn is true
+        if (micOn) {
+          try { rec.start(); } catch {}
+        }
+      };
+
+      rec.start();
+      recognitionRef.current = rec;
+      setMicOn(true);
+    } catch {
+      setMicOn(false);
+    }
+  }, [micOn, ensureChat, send, push]);
+
+  const stopMic = useCallback(() => {
+    try { recognitionRef.current?.stop(); } catch {}
+    recognitionRef.current = null;
+    setMicOn(false);
+  }, []);
+
+  // Gesture -> unmute + mic
+  const ensureInteractive = useCallback(async () => {
+    if (firstGestureDone.current) return;
+    firstGestureDone.current = true;
+
+    // unmute speaker (so avatar audio plays)
+    try {
+      if (videoRef.current) {
+        videoRef.current.muted = false;
+        setSpeakerMuted(false);
+        await videoRef.current.play().catch(() => {});
+      }
+    } catch {}
+
+    // start microphone if desired
+    if (!recognitionRef.current) startMic();
+  }, [startMic]);
+
+  // global gesture capture inside widget root
+  useEffect(() => {
+    const onAny = () => ensureInteractive();
+    window.addEventListener('pointerdown', onAny, { once: true, capture: true });
+    window.addEventListener('keydown', onAny, { once: true, capture: true });
+    return () => {
+      window.removeEventListener('pointerdown', onAny, { capture: true });
+      window.removeEventListener('keydown', onAny, { capture: true });
+    };
+  }, [ensureInteractive]);
+
+  // ------- Submit (typing) -------
   const onSubmit = useCallback(async (e) => {
     e?.preventDefault?.();
     const text = (input || '').trim();
     if (!text) return;
     setInput('');
     push('user', text);
-
     try {
       const id = await ensureChat();
       const reply = await send(id, text);
       push('assistant', reply);
       try { await window.__avatarSpeak?.(reply); } catch {}
     } catch (err) {
-      push(
-        'system',
-        `Message failed${err?.status ? ` (${err.status})` : ''}. Please try again.`
-      );
+      push('system', `Message failed${err?.status ? ` (${err.status})` : ''}. Please try again.`);
     }
   }, [input, ensureChat, send, push]);
 
-  // ---- Autostart / cleanup ----
+  // ------- Autostart pipeline -------
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -189,220 +281,181 @@ function PageInner() {
         }
       }
     })();
-    return () => { cancelled = true; stopAvatar(); };
-  }, [autostart, begin, ensureChat, stopAvatar]);
+    return () => { cancelled = true; stopAvatar(); stopMic(); };
+  }, [autostart, begin, ensureChat, stopAvatar, stopMic]);
 
-  // ---- Auto-scroll when chat is open ----
-  useEffect(() => {
-    if (!chatOpen) return;
-    scrollPinRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
-  }, [messages, chatOpen]);
+  // ------- UI helpers -------
+  const toggleSpeaker = useCallback(async () => {
+    const next = !speakerMuted;
+    setSpeakerMuted(next);
+    if (videoRef.current) {
+      videoRef.current.muted = next;
+      if (!next) {
+        try { await videoRef.current.play(); } catch {}
+      }
+    }
+  }, [speakerMuted]);
 
-  // ---- Controls ----
-  const toggleMute = useCallback(async () => {
-    const v = videoRef.current;
-    if (!v) return;
-    const next = !isMuted;
-    setIsMuted(next);
-    v.muted = next;
-    // ensure play is resumed after gesture
-    try { await v.play(); } catch {}
-  }, [isMuted]);
+  const toggleMic = useCallback(() => {
+    if (micOn) stopMic();
+    else startMic();
+  }, [micOn, startMic, stopMic]);
 
   const restart = useCallback(async () => {
+    // clear chat & restart session
+    setMessages([]);
     try { window.localStorage.removeItem(LS_CHAT_KEY); } catch {}
     setChatId('');
-    setMessages([]);
     await stopAvatar();
     await begin();
     await ensureChat();
   }, [begin, ensureChat, stopAvatar]);
 
-  const toggleFullscreen = useCallback(async () => {
-    const el = containerRef.current;
-    if (!el) return;
-    if (!document.fullscreenElement) {
-      await el.requestFullscreen().catch(() => {});
-      setIsFullscreen(true);
-    } else {
-      await document.exitFullscreen().catch(() => {});
-      setIsFullscreen(false);
-    }
+  const requestFullscreen = useCallback(() => {
+    const el = document.documentElement;
+    if (el.requestFullscreen) el.requestFullscreen();
   }, []);
 
-  const closePanel = useCallback(() => {
-    // if embedded in an iframe, let the parent close the overlay
-    try { window.parent?.postMessage({ type: 'avatar-widget:close' }, '*'); } catch {}
-    // also navigate away if opened directly
-    try { window.history.length > 1 ? window.history.back() : window.close(); } catch {}
-  }, []);
+  // ------- Layout -------
+  // When chat is closed: one row (video only). When open: 50/50 split.
+  const gridRows = isChatOpen ? '1fr 1fr' : '1fr';
 
-  // ---- UI ----
   return (
     <div
-      ref={containerRef}
       style={{
-        position: 'relative',
-        width: 'min(900px, 96vw)',
-        height: 'min(600px, calc(100vh - 48px))',
-        margin: '16px auto',
-        borderRadius: 16,
-        overflow: 'hidden',
-        background: '#000',
-        boxShadow: '0 20px 60px rgba(0,0,0,.45)',
+        width: 'min(960px, 98vw)',
+        height: 'min(860px, calc(100vh - 24px))',
+        margin: '0 auto',
+        display: 'grid',
+        gridTemplateRows: gridRows,
+        gap: 12,
+        padding: 12,
+        boxSizing: 'border-box',
       }}
+      onClick={ensureInteractive}
     >
-      {/* Video fills panel */}
-      <video
-        ref={videoRef}
-        playsInline
-        autoPlay
-        muted={isMuted}
-        style={{ width: '100%', height: '100%', objectFit: 'cover', background: '#000' }}
-      />
+      {/* Video area */}
+      <div style={{ position:'relative', borderRadius:16, overflow:'hidden', background:'#000' }}>
+        <video
+          ref={videoRef}
+          playsInline
+          autoPlay
+          muted={speakerMuted}
+          style={{ width:'100%', height:'100%', objectFit:'cover', background:'#000' }}
+        />
+        {status !== 'ready' && (
+          <div style={{
+            position:'absolute', inset:0, display:'grid', placeItems:'center',
+            color:'#fff', background:'rgba(0,0,0,.35)', fontWeight:700
+          }}>
+            {status === 'idle' ? 'Idle' : status === 'connecting' ? 'Connecting…' : `Error: ${error || 'Unknown'}`}
+          </div>
+        )}
 
-      {/* Dim overlay while not ready */}
-      {status !== 'ready' && (
-        <div
-          style={{
-            position: 'absolute', inset: 0,
-            display: 'grid', placeItems: 'center',
-            background: 'rgba(0,0,0,.35)',
-            color: '#fff', fontWeight: 700
-          }}
-        >
-          {status === 'idle' ? 'Idle' : status === 'connecting' ? 'Connecting…' : 'Error'}
-          {error ? <div style={{ marginTop: 8, fontSize: 12, opacity: .9 }}>Error: {error}</div> : null}
+        {/* Top-right: fullscreen & close (close just navigates back if in popup/iframe) */}
+        <div style={{ position:'absolute', top:10, right:10, display:'flex', gap:8 }}>
+          <IconBtn label="Fullscreen" onClick={requestFullscreen}>⛶</IconBtn>
+          {/* If you want an X to close the embed page itself: */}
+          {/* <IconBtn label="Close" onClick={() => window.close?.()}>✕</IconBtn> */}
+        </div>
+
+        {/* Bottom-center controls */}
+        <div style={{
+          position:'absolute', left:'50%', bottom:14, transform:'translateX(-50%)',
+          display:'flex', gap:10
+        }}>
+          <IconBtn
+            active={!speakerMuted}
+            label={speakerMuted ? 'Unmute' : 'Mute'}
+            onClick={toggleSpeaker}
+          >
+            {speakerMuted ? '🔇' : '🔊'}
+          </IconBtn>
+
+          <IconBtn
+            active={micOn}
+            label={micOn ? 'Mic on' : 'Mic off'}
+            onClick={toggleMic}
+          >
+            {micOn ? '🎙️' : '🎤'}
+          </IconBtn>
+
+          <IconBtn label="Restart" onClick={restart}>↻</IconBtn>
+
+          <IconBtn
+            label={isChatOpen ? 'Hide chat' : 'Show chat'}
+            onClick={() => setIsChatOpen((v) => !v)}
+          >
+            💬
+          </IconBtn>
+        </div>
+      </div>
+
+      {/* Chat (only rendered when open) */}
+      {isChatOpen && (
+        <div style={{
+          borderRadius:16, overflow:'hidden', border:'1px solid #1f2430',
+          background:'#0f1220', color:'#e9ecf1', display:'grid', gridTemplateRows:'1fr auto'
+        }}>
+          <div ref={chatScrollRef} style={{ padding:'10px 12px', overflowY:'auto', fontSize:14 }}>
+            {messages.length === 0 ? (
+              <div style={{ opacity:.75 }}>Speak or type to start the conversation.</div>
+            ) : messages.map((m,i) => (
+              <div key={i} style={{ marginBottom:10 }}>
+                <div style={{
+                  fontWeight:700, fontSize:12,
+                  color: m.role==='user' ? '#60a5fa' : m.role==='assistant' ? '#34d399' : '#e879f9'
+                }}>
+                  {m.role === 'assistant' ? 'Assistant' : m.role[0].toUpperCase()+m.role.slice(1)}
+                </div>
+                <div style={{ whiteSpace:'pre-wrap' }}>{m.text}</div>
+              </div>
+            ))}
+          </div>
+          <form onSubmit={onSubmit} style={{ display:'flex', gap:8, padding:10, borderTop:'1px solid #1f2430' }}>
+            <input
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder="Type your message… (or just talk)"
+              style={{
+                flex:1, borderRadius:10, border:'1px solid #2a3142',
+                background:'#12172a', color:'#e9ecf1', padding:'10px 12px', outline:'none'
+              }}
+            />
+            <button
+              type="submit"
+              disabled={!input.trim()}
+              style={{
+                padding:'10px 14px', borderRadius:10, border:'1px solid #2563eb',
+                background:'#2563eb', color:'#fff', fontWeight:700,
+                cursor: input.trim() ? 'pointer' : 'default'
+              }}
+            >Send</button>
+          </form>
         </div>
       )}
-
-      {/* Top bar: expand + close */}
-      <div style={{
-        position: 'absolute', top: 10, left: 10, right: 10, display: 'flex',
-        justifyContent: 'space-between', gap: 10, pointerEvents: 'none'
-      }}>
-        <div />
-        <div style={{ display: 'flex', gap: 8, pointerEvents: 'auto' }}>
-          <IconBtn title={isFullscreen ? 'Exit full screen' : 'Full screen'} onClick={toggleFullscreen}>
-            {/* square in square icon */}
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M9 3H3v6M15 3h6v6M3 15v6h6M21 15v6h-6" stroke="#fff" strokeWidth="2" strokeLinecap="round"/></svg>
-          </IconBtn>
-          <IconBtn title="Close" onClick={closePanel}>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M6 6l12 12M18 6L6 18" stroke="#fff" strokeWidth="2" strokeLinecap="round"/></svg>
-          </IconBtn>
-        </div>
-      </div>
-
-      {/* Bottom overlay controls */}
-      <div style={{
-        position: 'absolute', left: 0, right: 0, bottom: 12,
-        display: 'flex', justifyContent: 'center', gap: 10
-      }}>
-        <IconBtn
-          title={isMuted ? 'Unmute' : 'Mute'}
-          onClick={toggleMute}
-          disabled={status !== 'ready'}
-        >
-          {/* speaker icon */}
-          {isMuted ? (
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-              <path d="M11 5l-4 4H4v6h3l4 4V5z" stroke="#fff" strokeWidth="2" strokeLinejoin="round"/>
-              <path d="M14.5 9.5l5 5M19.5 9.5l-5 5" stroke="#fff" strokeWidth="2" strokeLinecap="round"/>
-            </svg>
-          ) : (
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-              <path d="M11 5l-4 4H4v6h3l4 4V5z" stroke="#fff" strokeWidth="2" strokeLinejoin="round"/>
-              <path d="M16 8a5 5 0 010 8M18.5 5.5a8.5 8.5 0 010 13" stroke="#fff" strokeWidth="2" strokeLinecap="round"/>
-            </svg>
-          )}
-        </IconBtn>
-
-        <IconBtn title="Chat" onClick={() => { setChatOpen(v => !v); }}>
-          {/* chat bubble */}
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-            <path d="M21 12a8 8 0 1 1-15.3 3.6L3 21l2.4-2.7A8 8 0 1 1 21 12Z" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-            <path d="M8 11h8M8 14h5" stroke="#fff" strokeWidth="2" strokeLinecap="round"/>
-          </svg>
-        </IconBtn>
-
-        <IconBtn title="Restart conversation" onClick={restart}>
-          {/* refresh */}
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-            <path d="M20 6v6h-6M4 18v-6h6" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-            <path d="M6 12a6 6 0 0111-3M18 12a6 6 0 01-11 3" stroke="#fff" strokeWidth="2" strokeLinecap="round"/>
-          </svg>
-        </IconBtn>
-      </div>
-
-      {/* Slide-in chat drawer */}
-      <div style={{
-        position: 'absolute',
-        top: 0, right: 0, height: '100%',
-        width: 'min(360px, 85vw)',
-        transform: `translateX(${chatOpen ? '0' : '100%'})`,
-        transition: 'transform .25s ease',
-        background: 'rgba(15,18,32,.96)',
-        borderLeft: '1px solid #1f2430',
-        display: 'grid',
-        gridTemplateRows: '1fr auto',
-      }}>
-        <div style={{ padding: 12, overflowY: 'auto', color: '#e9ecf1', fontSize: 14 }}>
-          {messages.length === 0 ? (
-            <div style={{ opacity: .75 }}>Type a message to start the conversation.</div>
-          ) : messages.map((m, i) => (
-            <div key={i} style={{ marginBottom: 10 }}>
-              <div style={{
-                fontWeight: 700, fontSize: 12,
-                color: m.role==='user' ? '#60a5fa' : m.role==='assistant' ? '#34d399' : '#e879f9'
-              }}>
-                {m.role === 'assistant' ? 'Assistant' : m.role[0].toUpperCase()+m.role.slice(1)}
-              </div>
-              <div style={{ whiteSpace:'pre-wrap' }}>{m.text}</div>
-            </div>
-          ))}
-          <div ref={scrollPinRef} />
-        </div>
-        <form onSubmit={onSubmit} style={{ display:'flex', gap:8, padding:10, borderTop:'1px solid #1f2430', background:'#0f1220' }}>
-          <input
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="Type your message…"
-            style={{
-              flex:1, borderRadius:10, border:'1px solid #2a3142',
-              background:'#12172a', color:'#e9ecf1', padding:'10px 12px', outline:'none'
-            }}
-          />
-          <button
-            type="submit"
-            disabled={!input.trim()}
-            style={{
-              padding:'10px 14px', borderRadius:10, border:'1px solid #2563eb',
-              background:'#2563eb', color:'#fff', fontWeight:700,
-              cursor: input.trim() ? 'pointer' : 'default'
-            }}
-          >Send</button>
-        </form>
-      </div>
     </div>
   );
 }
 
-function IconBtn({ children, onClick, title, disabled }) {
+function IconBtn({ children, onClick, label, active }) {
   return (
     <button
-      title={title}
       onClick={onClick}
-      disabled={!!disabled}
+      title={label}
+      aria-label={label}
       style={{
-        width: 38, height: 38, borderRadius: 19,
-        border: '1px solid rgba(255,255,255,.25)',
-        background: 'rgba(0,0,0,.45)',
-        color: '#fff', display: 'grid', placeItems: 'center',
-        backdropFilter: 'blur(6px)',
-        cursor: disabled ? 'default' : 'pointer'
+        width:44, height:44,
+        display:'grid', placeItems:'center',
+        borderRadius:999,
+        border:'1px solid rgba(255,255,255,.2)',
+        background: active ? 'rgba(255,255,255,.15)' : 'rgba(0,0,0,.45)',
+        color:'#fff',
+        backdropFilter:'blur(6px)',
+        cursor:'pointer'
       }}
     >
-      {children}
+      <span style={{ fontSize:18, lineHeight:1 }}>{children}</span>
     </button>
   );
 }
