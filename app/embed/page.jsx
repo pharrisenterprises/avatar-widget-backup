@@ -1,3 +1,4 @@
+// app/embed/page.jsx
 'use client';
 
 import React, {
@@ -13,18 +14,17 @@ import { loadHeygenSdk } from '../lib/loadHeygenSdk';
 
 const LS_CHAT_KEY = 'retell_chat_id';
 
+// Compact sizes (D-ID bottom-right vibe)
+const PANEL_W = 360;
+const PANEL_H = 560; // container height; video area takes ~60% when chat is open
+
 function PageInner() {
   const sp = useSearchParams();
   const autostart = useMemo(() => (sp?.get('autostart') ?? '1') === '1', [sp]);
-  const q = (sp?.get('q') || 'medium').toLowerCase();
 
   const videoRef = useRef(null);
   const avatarRef = useRef(null);
   const chatScrollRef = useRef(null);
-  const firstGestureDone = useRef(false);
-
-  // Web Speech API
-  const recognitionRef = useRef(null);
 
   const [status, setStatus] = useState('idle'); // idle | connecting | ready | error
   const [error, setError] = useState('');
@@ -32,26 +32,30 @@ function PageInner() {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
 
-  // UI toggles
-  const [isChatOpen, setIsChatOpen] = useState(false);
-  const [micOn, setMicOn] = useState(true);
-  const [speakerMuted, setSpeakerMuted] = useState(false);
+  const [showChat, setShowChat] = useState(false);
+  const [micOn, setMicOn] = useState(true);    // we’ll request mic on first gesture
+  const [speakerOn, setSpeakerOn] = useState(true);
+
+  const [needGesture, setNeedGesture] = useState(true); // “Tap to start” overlay
+  const micStreamRef = useRef(null);
 
   const avatarName = process.env.NEXT_PUBLIC_HEYGEN_AVATAR_ID || '';
 
-  const push = useCallback((role, text) => {
-    setMessages((p) => [...p, { role, text }]);
-  }, []);
-
-  // auto-scroll chat to latest
+  // auto-scroll chat to bottom on new messages
   useEffect(() => {
     const el = chatScrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [messages]);
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [messages.length, showChat]);
+
+  const pushMsg = useCallback((role, text) => {
+    setMessages((p) => [...p, { role, text: String(text || '') }]);
+  }, []);
 
   // ------- Retell helpers -------
   const ensureChat = useCallback(async () => {
     if (chatId) return chatId;
+    // try restore
     try {
       const s = window.localStorage.getItem(LS_CHAT_KEY);
       if (s) {
@@ -59,10 +63,12 @@ function PageInner() {
         return s;
       }
     } catch {}
+    // start
     const r = await fetch('/api/retell-chat/start', { cache: 'no-store' });
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j?.ok || !j?.chatId) {
-      throw new Error('CHAT_START_FAILED');
+      const d = j?.detail ? ` — ${JSON.stringify(j.detail)}` : '';
+      throw Object.assign(new Error('CHAT_START_FAILED' + d), { cause: j });
     }
     setChatId(j.chatId);
     try { window.localStorage.setItem(LS_CHAT_KEY, j.chatId); } catch {}
@@ -80,10 +86,41 @@ function PageInner() {
     if (!r.ok || !j?.ok) {
       const err = new Error('SEND_FAILED');
       err.status = r.status;
+      err.detail = j;
       throw err;
     }
     return j.reply || '';
   }, []);
+
+  // ------- Audio / Mic helpers -------
+  const acquireMic = useCallback(async () => {
+    try {
+      if (micStreamRef.current) return micStreamRef.current;
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micStreamRef.current = stream;
+      return stream;
+    } catch (e) {
+      // If user denies, keep micOff but don’t crash
+      setMicOn(false);
+      return null;
+    }
+  }, []);
+
+  const releaseMic = useCallback(() => {
+    try {
+      micStreamRef.current?.getTracks()?.forEach(t => t.stop());
+    } catch {}
+    micStreamRef.current = null;
+  }, []);
+
+  const resumeOutputAudio = useCallback(async () => {
+    try {
+      if (videoRef.current && speakerOn) {
+        videoRef.current.muted = false;
+        await videoRef.current.play().catch(() => {});
+      }
+    } catch {}
+  }, [speakerOn]);
 
   // ------- HeyGen helpers -------
   const stopAvatar = useCallback(async () => {
@@ -93,6 +130,7 @@ function PageInner() {
     } catch {}
     avatarRef.current = null;
     if (videoRef.current) videoRef.current.srcObject = null;
+    setStatus('idle');
   }, []);
 
   const begin = useCallback(async () => {
@@ -116,9 +154,8 @@ function PageInner() {
       const stream = evt?.detail;
       if (videoRef.current && stream instanceof MediaStream) {
         videoRef.current.srcObject = stream;
-        videoRef.current.muted = speakerMuted; // reflect toggle
+        videoRef.current.muted = !speakerOn; // default true, but we’ll unmute after gesture
         videoRef.current.onloadedmetadata = () => {
-          // attempt playback (will succeed after first user gesture)
           videoRef.current.play().catch(() => {});
           setStatus('ready');
         };
@@ -130,10 +167,7 @@ function PageInner() {
       setStatus('idle');
     });
 
-    const quality =
-      q.startsWith('l') ? (AvatarQuality?.Low || 'low') :
-      q.startsWith('h') ? (AvatarQuality?.High || 'high') :
-                          (AvatarQuality?.Medium || 'medium');
+    const quality = AvatarQuality?.High || 'high';
 
     await avatar.createStartAvatar({
       avatarName,
@@ -141,7 +175,7 @@ function PageInner() {
       welcomeMessage: '',
     });
 
-    // expose speak() for internal use
+    // Helper to speak exactly the reply (lip-sync == captions)
     async function speak(text) {
       if (!text) return;
       const payload = TaskType
@@ -150,256 +184,144 @@ function PageInner() {
       try { await avatar.speak(payload); } catch {}
     }
     window.__avatarSpeak = speak;
-  }, [avatarName, q, speakerMuted]);
+  }, [avatarName, speakerOn]);
 
-  // ------- Mic (browser SpeechRecognition) -------
-  const hasSR = () =>
-    typeof window !== 'undefined' &&
-    (window.SpeechRecognition || window.webkitSpeechRecognition);
-
-  const startMic = useCallback(() => {
-    if (!hasSR()) {
-      setError('Voice input not supported on this browser.');
-      setMicOn(false);
-      return;
-    }
+  // ------- Gesture gate (autoplay/mic) -------
+  const onFirstTap = useCallback(async () => {
+    setNeedGesture(false);
+    if (micOn) await acquireMic(); // prompt mic once
+    await resumeOutputAudio();     // unmute video output
     try {
-      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-      const rec = new SR();
-      rec.continuous = true;
-      rec.interimResults = true;
-      rec.lang = 'en-US';
-
-      rec.onresult = async (e) => {
-        // Show interim in the input box
-        let interim = '';
-        for (let i = e.resultIndex; i < e.results.length; i++) {
-          const res = e.results[i];
-          if (res.isFinal) {
-            const finalTxt = res[0].transcript.trim();
-            if (finalTxt) {
-              push('user', finalTxt);
-              try {
-                const id = await ensureChat();
-                const reply = await send(id, finalTxt);
-                push('assistant', reply);
-                try { await window.__avatarSpeak?.(reply); } catch {}
-              } catch (err) {
-                push('system', `Message failed${err?.status ? ` (${err.status})` : ''}. Please try again.`);
-              }
-            }
-          } else {
-            interim += res[0].transcript;
-          }
-        }
-        setInput(interim);
-      };
-
-      rec.onend = () => {
-        // keep listening while micOn is true
-        if (micOn) {
-          try { rec.start(); } catch {}
-        }
-      };
-
-      rec.start();
-      recognitionRef.current = rec;
-      setMicOn(true);
-    } catch {
-      setMicOn(false);
+      // If autostart requested, kick the pipeline now that we have a gesture
+      if (status === 'idle') await begin();
+      await ensureChat();
+    } catch (e) {
+      setError(e?.message || 'Startup error');
+      setStatus('error');
     }
-  }, [micOn, ensureChat, send, push]);
+  }, [micOn, acquireMic, resumeOutputAudio, status, begin, ensureChat]);
 
-  const stopMic = useCallback(() => {
-    try { recognitionRef.current?.stop(); } catch {}
-    recognitionRef.current = null;
-    setMicOn(false);
-  }, []);
-
-  // Gesture -> unmute + mic
-  const ensureInteractive = useCallback(async () => {
-    if (firstGestureDone.current) return;
-    firstGestureDone.current = true;
-
-    // unmute speaker (so avatar audio plays)
-    try {
-      if (videoRef.current) {
-        videoRef.current.muted = false;
-        setSpeakerMuted(false);
-        await videoRef.current.play().catch(() => {});
-      }
-    } catch {}
-
-    // start microphone if desired
-    if (!recognitionRef.current) startMic();
-  }, [startMic]);
-
-  // global gesture capture inside widget root
-  useEffect(() => {
-    const onAny = () => ensureInteractive();
-    window.addEventListener('pointerdown', onAny, { once: true, capture: true });
-    window.addEventListener('keydown', onAny, { once: true, capture: true });
-    return () => {
-      window.removeEventListener('pointerdown', onAny, { capture: true });
-      window.removeEventListener('keydown', onAny, { capture: true });
-    };
-  }, [ensureInteractive]);
-
-  // ------- Submit (typing) -------
+  // ------- Submit (text) -------
   const onSubmit = useCallback(async (e) => {
     e?.preventDefault?.();
     const text = (input || '').trim();
     if (!text) return;
     setInput('');
-    push('user', text);
+    pushMsg('user', text);
     try {
       const id = await ensureChat();
       const reply = await send(id, text);
-      push('assistant', reply);
+      pushMsg('assistant', reply);
       try { await window.__avatarSpeak?.(reply); } catch {}
     } catch (err) {
-      push('system', `Message failed${err?.status ? ` (${err.status})` : ''}. Please try again.`);
+      pushMsg('system', `Message failed${err?.status ? ` (${err.status})` : ''}. Please try again.`);
     }
-  }, [input, ensureChat, send, push]);
+  }, [input, ensureChat, send, pushMsg]);
 
-  // ------- Autostart pipeline -------
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        try {
-          const s = window.localStorage.getItem(LS_CHAT_KEY);
-          if (s) setChatId(s);
-        } catch {}
-        if (!autostart) return;
-        await begin();
-        if (!cancelled) await ensureChat();
-      } catch (e) {
-        if (!cancelled) {
-          setError(e?.message || 'Startup error');
-          setStatus('error');
-        }
-      }
-    })();
-    return () => { cancelled = true; stopAvatar(); stopMic(); };
-  }, [autostart, begin, ensureChat, stopAvatar, stopMic]);
+  // Clean up mic on unmount
+  useEffect(() => () => releaseMic(), [releaseMic]);
 
-  // ------- UI helpers -------
-  const toggleSpeaker = useCallback(async () => {
-    const next = !speakerMuted;
-    setSpeakerMuted(next);
-    if (videoRef.current) {
-      videoRef.current.muted = next;
-      if (!next) {
-        try { await videoRef.current.play(); } catch {}
-      }
-    }
-  }, [speakerMuted]);
-
-  const toggleMic = useCallback(() => {
-    if (micOn) stopMic();
-    else startMic();
-  }, [micOn, startMic, stopMic]);
-
-  const restart = useCallback(async () => {
-    // clear chat & restart session
-    setMessages([]);
-    try { window.localStorage.removeItem(LS_CHAT_KEY); } catch {}
-    setChatId('');
-    await stopAvatar();
-    await begin();
-    await ensureChat();
-  }, [begin, ensureChat, stopAvatar]);
-
-  const requestFullscreen = useCallback(() => {
-    const el = document.documentElement;
-    if (el.requestFullscreen) el.requestFullscreen();
-  }, []);
-
-  // ------- Layout -------
-  // When chat is closed: one row (video only). When open: 50/50 split.
-  const gridRows = isChatOpen ? '1fr 1fr' : '1fr';
-
-  return (
-    <div
-      style={{
-        width: 'min(960px, 98vw)',
-        height: 'min(860px, calc(100vh - 24px))',
-        margin: '0 auto',
-        display: 'grid',
-        gridTemplateRows: gridRows,
-        gap: 12,
-        padding: 12,
-        boxSizing: 'border-box',
-      }}
-      onClick={ensureInteractive}
-    >
-      {/* Video area */}
-      <div style={{ position:'relative', borderRadius:16, overflow:'hidden', background:'#000' }}>
-        <video
-          ref={videoRef}
-          playsInline
-          autoPlay
-          muted={speakerMuted}
-          style={{ width:'100%', height:'100%', objectFit:'cover', background:'#000' }}
-        />
-        {status !== 'ready' && (
-          <div style={{
-            position:'absolute', inset:0, display:'grid', placeItems:'center',
-            color:'#fff', background:'rgba(0,0,0,.35)', fontWeight:700
-          }}>
-            {status === 'idle' ? 'Idle' : status === 'connecting' ? 'Connecting…' : `Error: ${error || 'Unknown'}`}
-          </div>
-        )}
-
-        {/* Top-right: fullscreen & close (close just navigates back if in popup/iframe) */}
-        <div style={{ position:'absolute', top:10, right:10, display:'flex', gap:8 }}>
-          <IconBtn label="Fullscreen" onClick={requestFullscreen}>⛶</IconBtn>
-          {/* If you want an X to close the embed page itself: */}
-          {/* <IconBtn label="Close" onClick={() => window.close?.()}>✕</IconBtn> */}
-        </div>
-
-        {/* Bottom-center controls */}
+  // ------- UI -------
+  // Layout: compact card; when showChat=false, full card is video
+  // when showChat=true, video top (~60%), chat bottom (~40%)
+  const videoArea = (
+    <div style={{
+      position:'relative',
+      borderRadius:12,
+      overflow:'hidden',
+      background:'#000',
+      minHeight: showChat ? Math.round(PANEL_H * 0.6) : PANEL_H - 56, // leave room for header if needed
+    }}>
+      <video
+        ref={videoRef}
+        playsInline
+        autoPlay
+        muted={!speakerOn}
+        style={{ width:'100%', height:'100%', objectFit:'cover', background:'#000' }}
+      />
+      {status !== 'ready' && (
         <div style={{
-          position:'absolute', left:'50%', bottom:14, transform:'translateX(-50%)',
-          display:'flex', gap:10
+          position:'absolute', inset:0, display:'grid', placeItems:'center',
+          color:'#fff', background:'rgba(0,0,0,.35)', fontWeight:700
         }}>
-          <IconBtn
-            active={!speakerMuted}
-            label={speakerMuted ? 'Unmute' : 'Mute'}
-            onClick={toggleSpeaker}
-          >
-            {speakerMuted ? '🔇' : '🔊'}
-          </IconBtn>
-
-          <IconBtn
-            active={micOn}
-            label={micOn ? 'Mic on' : 'Mic off'}
-            onClick={toggleMic}
-          >
-            {micOn ? '🎙️' : '🎤'}
-          </IconBtn>
-
-          <IconBtn label="Restart" onClick={restart}>↻</IconBtn>
-
-          <IconBtn
-            label={isChatOpen ? 'Hide chat' : 'Show chat'}
-            onClick={() => setIsChatOpen((v) => !v)}
-          >
-            💬
-          </IconBtn>
+          {status === 'idle' ? 'Idle' : status === 'connecting' ? 'Connecting…' : 'Error'}
         </div>
+      )}
+
+      {/* Floating controls (bottom-left) */}
+      <div style={{
+        position:'absolute', left:8, bottom:8, display:'flex', gap:8
+      }}>
+        <button
+          onClick={() => setShowChat(s => !s)}
+          title={showChat ? 'Hide chat' : 'Show chat'}
+          style={btnStyle}
+        >
+          💬
+        </button>
+        <button
+          onClick={() => {
+            const next = !micOn;
+            setMicOn(next);
+            if (next) acquireMic(); else releaseMic();
+          }}
+          title={micOn ? 'Turn mic off' : 'Turn mic on'}
+          style={btnStyle}
+        >
+          {micOn ? '🎙️' : '🔇'}
+        </button>
+        <button
+          onClick={() => {
+            const next = !speakerOn;
+            setSpeakerOn(next);
+            if (videoRef.current) videoRef.current.muted = !next;
+            if (next) videoRef.current?.play?.();
+          }}
+          title={speakerOn ? 'Mute speaker' : 'Unmute speaker'}
+          style={btnStyle}
+        >
+          {speakerOn ? '🔊' : '🔈'}
+        </button>
       </div>
 
-      {/* Chat (only rendered when open) */}
-      {isChatOpen && (
+      {/* One-time “Tap to start” to satisfy autoplay/mic */}
+      {needGesture && autostart && (
+        <button
+          onClick={onFirstTap}
+          style={{
+            position:'absolute', inset:0, display:'grid', placeItems:'center',
+            background:'rgba(0,0,0,.55)', color:'#fff', fontWeight:800, border:'none', cursor:'pointer'
+          }}
+        >
+          Tap to start audio & mic
+        </button>
+      )}
+    </div>
+  );
+
+  return (
+    <div style={{
+      width: PANEL_W,
+      height: PANEL_H,
+      boxSizing:'border-box',
+      margin:'0 auto',
+      padding:10,
+      background:'transparent',
+      display:'grid',
+      gridTemplateRows: showChat ? '60% 40%' : '1fr',
+      gap:10,
+      borderRadius: 14,
+    }}>
+      {videoArea}
+
+      {showChat && (
         <div style={{
-          borderRadius:16, overflow:'hidden', border:'1px solid #1f2430',
+          borderRadius:12, overflow:'hidden', border:'1px solid #1f2430',
           background:'#0f1220', color:'#e9ecf1', display:'grid', gridTemplateRows:'1fr auto'
         }}>
           <div ref={chatScrollRef} style={{ padding:'10px 12px', overflowY:'auto', fontSize:14 }}>
             {messages.length === 0 ? (
-              <div style={{ opacity:.75 }}>Speak or type to start the conversation.</div>
+              <div style={{ opacity:.75 }}>Type a message to start the conversation.</div>
             ) : messages.map((m,i) => (
               <div key={i} style={{ marginBottom:10 }}>
                 <div style={{
@@ -416,7 +338,7 @@ function PageInner() {
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="Type your message… (or just talk)"
+              placeholder="Type your message…"
               style={{
                 flex:1, borderRadius:10, border:'1px solid #2a3142',
                 background:'#12172a', color:'#e9ecf1', padding:'10px 12px', outline:'none'
@@ -434,31 +356,29 @@ function PageInner() {
           </form>
         </div>
       )}
+
+      {error && (
+        <div style={{
+          position:'absolute', left:10, right:10, bottom:10,
+          background:'#2a1215', border:'1px solid #5c1a1e',
+          color:'#ffd4d6', borderRadius:10, padding:'8px 10px', fontSize:12
+        }}>
+          {error}
+        </div>
+      )}
     </div>
   );
 }
 
-function IconBtn({ children, onClick, label, active }) {
-  return (
-    <button
-      onClick={onClick}
-      title={label}
-      aria-label={label}
-      style={{
-        width:44, height:44,
-        display:'grid', placeItems:'center',
-        borderRadius:999,
-        border:'1px solid rgba(255,255,255,.2)',
-        background: active ? 'rgba(255,255,255,.15)' : 'rgba(0,0,0,.45)',
-        color:'#fff',
-        backdropFilter:'blur(6px)',
-        cursor:'pointer'
-      }}
-    >
-      <span style={{ fontSize:18, lineHeight:1 }}>{children}</span>
-    </button>
-  );
-}
+const btnStyle = {
+  background:'rgba(255,255,255,.15)',
+  color:'#fff',
+  border:'1px solid rgba(255,255,255,.25)',
+  borderRadius:10,
+  padding:'8px 10px',
+  cursor:'pointer',
+  backdropFilter:'blur(4px)',
+};
 
 export default function EmbedPage() {
   return (
