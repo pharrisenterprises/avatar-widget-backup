@@ -1,5 +1,4 @@
 // app/lib/loadHeygenSdk.js
-// Client-only dynamic import of HeyGen Streaming Avatar SDK.
 export async function loadHeygenSdk() {
   if (typeof window === 'undefined') return null;
   try {
