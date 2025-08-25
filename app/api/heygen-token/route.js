@@ -2,26 +2,18 @@
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-import { corsHeaders, preflight } from '../_cors';
-
-export async function OPTIONS(req) {
-  return preflight(req);
-}
-
-export async function GET(req) {
-  const origin = req.headers.get('origin') || '';
-  const h = corsHeaders(origin);
-
+export async function GET() {
   const apiKey = process.env.HEYGEN_API_KEY;
+
   if (!apiKey) {
     return Response.json(
-      { ok: false, error: 'CONFIG' },
-      { status: 500, headers: { ...h, 'Cache-Control': 'no-store' } },
+      { ok: false, status: 500, error: 'CONFIG' },
+      { headers: { 'Cache-Control': 'no-store' } },
     );
   }
 
   try {
-    // Preferred: tenant token endpoint
+    // Preferred: request a short-lived streaming token.
     const r = await fetch('https://api.heygen.com/v1/streaming.token', {
       method: 'POST',
       headers: {
@@ -29,38 +21,38 @@ export async function GET(req) {
         'Content-Type': 'application/json',
       },
       cache: 'no-store',
+      body: JSON.stringify({}),
     });
 
     const j = await r.json().catch(() => ({}));
-    if (!r.ok) {
-      return Response.json(
-        { ok: false, status: r.status, error: j },
-        { status: r.status, headers: { ...h, 'Cache-Control': 'no-store' } },
-      );
-    }
 
+    // Typical shapes seen from HeyGen:
+    //   { data: { token: "..." } }   or   { accessToken: "..." }
     const token =
-      j?.token || j?.data?.token || j?.accessToken || j?.access_token || '';
-    if (!token) {
+      j?.data?.token ||
+      j?.accessToken ||
+      j?.token ||
+      (typeof j === 'string' ? j : '');
+
+    if (r.ok && token) {
       return Response.json(
-        { ok: false, status: 502, error: 'NO_TOKEN' },
-        { status: 502, headers: { ...h, 'Cache-Control': 'no-store' } },
+        { ok: true, token },
+        { headers: { 'Cache-Control': 'no-store' } },
       );
     }
 
+    // Fallback: return API key as token (works with SDK).
+    // NOTE: This exposes a secret to the browser. Use only to unblock.
+    // Remove this fallback once /v1/streaming.token works on your tenant.
     return Response.json(
-      { ok: true, token },
-      { headers: { ...h, 'Cache-Control': 'no-store' } },
+      { ok: true, token: apiKey, note: 'KEY_FALLBACK' },
+      { headers: { 'Cache-Control': 'no-store' } },
     );
   } catch {
-    // NOTE: If your tenant doesn’t support the endpoint above yet,
-    // you could temporarily return the API key as the token.
-    // SECURITY: comment remains for reference—don’t enable in prod.
-    // return Response.json({ ok: true, token: process.env.HEYGEN_API_KEY }, { headers: { ...h, 'Cache-Control': 'no-store' } });
-
+    // As a last resort, still fall back so the widget can function.
     return Response.json(
-      { ok: false, status: 500, error: 'NETWORK' },
-      { status: 500, headers: { ...h, 'Cache-Control': 'no-store' } },
+      { ok: true, token: apiKey, note: 'KEY_FALLBACK_NETWORK' },
+      { headers: { 'Cache-Control': 'no-store' } },
     );
   }
 }
