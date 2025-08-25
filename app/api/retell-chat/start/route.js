@@ -2,23 +2,14 @@
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-import { corsHeaders, preflight } from '../../_cors';
-
-export async function OPTIONS(req) {
-  return preflight(req);
-}
-
-export async function GET(req) {
-  const origin = req.headers.get('origin') || '';
-  const h = corsHeaders(origin);
-
+export async function GET() {
   const apiKey = process.env.RETELL_API_KEY;
   const agentId = process.env.RETELL_CHAT_AGENT_ID;
 
   if (!apiKey || !agentId) {
     return Response.json(
       { ok: false, status: 500, error: 'CONFIG' },
-      { status: 500, headers: { ...h, 'Cache-Control': 'no-store' } },
+      { headers: { 'Cache-Control': 'no-store' } },
     );
   }
 
@@ -37,7 +28,7 @@ export async function GET(req) {
     if (!r.ok) {
       return Response.json(
         { ok: false, status: r.status, error: j },
-        { status: r.status, headers: { ...h, 'Cache-Control': 'no-store' } },
+        { headers: { 'Cache-Control': 'no-store' } },
       );
     }
 
@@ -45,18 +36,18 @@ export async function GET(req) {
     if (!chatId) {
       return Response.json(
         { ok: false, status: 502, error: 'NO_CHAT_ID' },
-        { status: 502, headers: { ...h, 'Cache-Control': 'no-store' } },
+        { headers: { 'Cache-Control': 'no-store' } },
       );
     }
 
     return Response.json(
       { ok: true, chatId },
-      { headers: { ...h, 'Cache-Control': 'no-store' } },
+      { headers: { 'Cache-Control': 'no-store' } },
     );
   } catch {
     return Response.json(
       { ok: false, status: 500, error: 'NETWORK' },
-      { status: 500, headers: { ...h, 'Cache-Control': 'no-store' } },
+      { headers: { 'Cache-Control': 'no-store' } },
     );
   }
 }
