@@ -11,7 +11,7 @@ export async function GET() {
     );
   }
 
-  // 1) Try to mint a short-lived streaming token (best practice)
+  // Try short-lived streaming token first (not all tenants support this)
   try {
     const r = await fetch('https://api.heygen.com/v1/streaming.token', {
       method: 'POST',
@@ -20,16 +20,10 @@ export async function GET() {
         'Content-Type': 'application/json',
       },
       cache: 'no-store',
-      body: JSON.stringify({ ttl: 3600 }), // 1 hour
+      body: JSON.stringify({ ttl: 3600 }),
     });
-
-    // Some tenants return 404/400 if not enabled — safely fall back
     const j = await r.json().catch(() => ({}));
-    const token =
-      j?.token ||
-      j?.data?.token ||
-      (typeof j === 'string' ? j : '');
-
+    const token = j?.token || j?.data?.token || (typeof j === 'string' ? j : '');
     if (r.ok && token) {
       return Response.json(
         { ok: true, token, fallback: false },
@@ -37,10 +31,10 @@ export async function GET() {
       );
     }
   } catch {
-    // ignore and fall back below
+    // ignore and fall through to fallback
   }
 
-  // 2) Fallback: return API key (works with SDK, but exposes a secret to the browser)
+  // Fallback: return API key (SDK accepts it)
   return Response.json(
     { ok: true, token: apiKey, fallback: true },
     { headers: { 'Cache-Control': 'no-store' } },
