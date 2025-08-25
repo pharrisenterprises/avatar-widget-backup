@@ -12,36 +12,29 @@ export async function GET() {
   }
 
   try {
-    // Preferred: ephemeral token
     const r = await fetch('https://api.heygen.com/v1/streaming.token', {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${key}`,
         'Content-Type': 'application/json',
       },
-      // body can be {} – no special params required
       body: JSON.stringify({}),
       cache: 'no-store',
     });
 
-    // Some tenants return { data: { token } }, some { token }
     const j = await r.json().catch(() => ({}));
     const token = j?.data?.token || j?.token || '';
-
     if (r.ok && token) {
-      return Response.json(
-        { ok: true, token },
-        { headers: { 'Cache-Control': 'no-store' } }
-      );
+      return Response.json({ ok: true, token }, { headers: { 'Cache-Control': 'no-store' } });
     }
 
-    // Fallback: return API key as token (temporary unblock)
+    // Fallback: allow using the API key directly as token for now
     return Response.json(
       { ok: true, token: key, fallback: true },
       { headers: { 'Cache-Control': 'no-store' } }
     );
-  } catch (e) {
-    // Network trouble -> fallback to API key as token
+  } catch {
+    // Network issue -> fallback to API key as token
     return Response.json(
       { ok: true, token: key, fallback: true },
       { headers: { 'Cache-Control': 'no-store' } }
