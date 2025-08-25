@@ -2,12 +2,21 @@
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
+import { corsHeaders, preflight } from '../../_cors';
+
+export async function OPTIONS(req) {
+  return preflight(req);
+}
+
 export async function POST(req) {
+  const origin = req.headers.get('origin') || '';
+  const h = corsHeaders(origin);
+
   const apiKey = process.env.RETELL_API_KEY;
   if (!apiKey) {
     return Response.json(
       { ok: false, status: 500, error: 'CONFIG' },
-      { headers: { 'Cache-Control': 'no-store' } }
+      { headers: { ...h, 'Cache-Control': 'no-store' } }
     );
   }
 
@@ -18,7 +27,7 @@ export async function POST(req) {
   if (!chatId || !text) {
     return Response.json(
       { ok: false, status: 400, error: 'BAD_INPUT' },
-      { headers: { 'Cache-Control': 'no-store' } }
+      { headers: { ...h, 'Cache-Control': 'no-store' } }
     );
   }
 
@@ -37,19 +46,19 @@ export async function POST(req) {
     if (!r.ok) {
       return Response.json(
         { ok: false, status: r.status, error: j },
-        { headers: { 'Cache-Control': 'no-store' } }
+        { headers: { ...h, 'Cache-Control': 'no-store' } }
       );
     }
 
     const reply = j?.messages?.[0]?.content || '';
     return Response.json(
       { ok: true, reply },
-      { headers: { 'Cache-Control': 'no-store' } }
+      { headers: { ...h, 'Cache-Control': 'no-store' } }
     );
   } catch {
     return Response.json(
       { ok: false, status: 500, error: 'NETWORK' },
-      { headers: { 'Cache-Control': 'no-store' } }
+      { headers: { ...h, 'Cache-Control': 'no-store' } }
     );
   }
 }
