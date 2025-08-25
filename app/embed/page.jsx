@@ -14,17 +14,76 @@ import { loadHeygenSdk } from '../lib/loadHeygenSdk';
 
 const LS_CHAT_KEY = 'retell_chat_id';
 
+// Simple SVG icons (inline)
+const Icon = {
+  MicOn:   (props) => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" {...props}>
+      <path d="M12 15a4 4 0 0 0 4-4V7a4 4 0 1 0-8 0v4a4 4 0 0 0 4 4Z" stroke="currentColor" strokeWidth="2"/>
+      <path d="M19 11a7 7 0 0 1-14 0M12 18v4" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+    </svg>
+  ),
+  MicOff:  (props) => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" {...props}>
+      <path d="M1.5 1.5l21 21" stroke="currentColor" strokeWidth="2"/>
+      <path d="M12 15a4 4 0 0 0 4-4V7a4 4 0 0 0-6.8-2.8" stroke="currentColor" strokeWidth="2"/>
+      <path d="M5 11a7 7 0 0 0 11.5 5.3M12 18v4" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+    </svg>
+  ),
+  Volume:  (props) => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" {...props}>
+      <path d="M11 5 6 9H3v6h3l5 4V5Z" stroke="currentColor" strokeWidth="2" strokeLinejoin="round"/>
+      <path d="M15 9a4 4 0 0 1 0 6M18 7a7 7 0 0 1 0 10" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+    </svg>
+  ),
+  Mute:    (props) => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" {...props}>
+      <path d="M1.5 1.5l21 21" stroke="currentColor" strokeWidth="2"/>
+      <path d="M11 5 6 9H3v6h3l5 4V5Z" stroke="currentColor" strokeWidth="2" strokeLinejoin="round"/>
+      <path d="M18 7a7 7 0 0 1 2 5 7 7 0 0 1-1.3 4" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+    </svg>
+  ),
+  Full:    (props) => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" {...props}>
+      <path d="M8 3H3v5M16 3h5v5M3 16v5h5M16 21h5v-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+    </svg>
+  ),
+  Restart: (props) => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" {...props}>
+      <path d="M3 4v6h6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+      <path d="M21 20a9 9 0 1 1-3-13.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+    </svg>
+  ),
+};
+
+// Speech-to-text using Web Speech API (Chrome)
+function makeRecognizer(onText) {
+  const SR = typeof window !== 'undefined'
+    ? (window.SpeechRecognition || window.webkitSpeechRecognition)
+    : null;
+  if (!SR) return null;
+  const rec = new SR();
+  rec.lang = 'en-US';
+  rec.continuous = true;
+  rec.interimResults = false;
+  rec.onresult = (e) => {
+    const i = e.results.length - 1;
+    const txt = e.results[i]?.[0]?.transcript || '';
+    if (txt.trim()) onText(txt.trim());
+  };
+  rec.onerror = () => {}; // swallow errors; we surface status elsewhere
+  return rec;
+}
+
 function PageInner() {
   const sp = useSearchParams();
   const autostart = useMemo(() => (sp?.get('autostart') ?? '1') === '1', [sp]);
-  const layout = useMemo(() => (sp?.get('layout') || '').toLowerCase(), [sp]);
-  const videoFirst = useMemo(() => sp?.get('videoFirst') === '1', [sp]);
-  const qualityQuery = useMemo(() => (sp?.get('q') || 'medium').toLowerCase(), [sp]);
+  const layoutCompact = useMemo(() => (sp?.get('layout') ?? 'compact') === 'compact', [sp]);
+  const videoFirst = useMemo(() => (sp?.get('videoFirst') ?? '1') === '1', [sp]);
 
+  const containerRef = useRef(null);
   const videoRef = useRef(null);
   const avatarRef = useRef(null);
-
-  const chatScrollRef = useRef(null);
+  const recRef = useRef(null); // SpeechRecognition
 
   const [status, setStatus] = useState('idle'); // idle | connecting | ready | error
   const [error, setError] = useState('');
@@ -32,13 +91,12 @@ function PageInner() {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
 
-  const avatarName = process.env.NEXT_PUBLIC_HEYGEN_AVATAR_ID || '';
+  const [soundOn, setSoundOn] = useState(true);
+  const [micOn, setMicOn] = useState(true);
+  const [needGesture, setNeedGesture] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
-  // Auto-scroll chat to bottom on new messages
-  useEffect(() => {
-    const el = chatScrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [messages]);
+  const avatarName = process.env.NEXT_PUBLIC_HEYGEN_AVATAR_ID || '';
 
   const push = useCallback((role, text) => {
     setMessages((p) => [...p, { role, text }]);
@@ -56,13 +114,9 @@ function PageInner() {
     } catch {}
     const r = await fetch('/api/retell-chat/start', { cache: 'no-store' });
     const j = await r.json().catch(() => ({}));
-
     if (!r.ok || !j?.ok || !j?.chatId) {
-      const d = j?.detail ? ` — ${JSON.stringify(j.detail)}` : '';
-      const s = r?.status ? ` [${r.status}]` : '';
-      throw new Error('CHAT_START_FAILED' + s + d);
+      throw new Error('CHAT_START_FAILED');
     }
-
     setChatId(j.chatId);
     try { window.localStorage.setItem(LS_CHAT_KEY, j.chatId); } catch {}
     return j.chatId;
@@ -94,6 +148,18 @@ function PageInner() {
     if (videoRef.current) videoRef.current.srcObject = null;
   }, []);
 
+  const tryPlay = useCallback(async () => {
+    try {
+      if (!videoRef.current) return;
+      if (soundOn) videoRef.current.muted = false;
+      await videoRef.current.play();
+      setNeedGesture(false);
+    } catch {
+      // Autoplay blocked — show “tap to enable” shim
+      setNeedGesture(true);
+    }
+  }, [soundOn]);
+
   const begin = useCallback(async () => {
     setStatus('connecting');
     setError('');
@@ -115,12 +181,10 @@ function PageInner() {
       const stream = evt?.detail;
       if (videoRef.current && stream instanceof MediaStream) {
         videoRef.current.srcObject = stream;
-        // Keep muted=true for autoplay; browser will prompt for mic automatically
-        videoRef.current.muted = true;
-        videoRef.current.onloadedmetadata = () => {
-          videoRef.current.play().catch(() => {});
-          setStatus('ready');
-        };
+        videoRef.current.playsInline = true;
+        // try to unmute (play) immediately
+        tryPlay();
+        setStatus('ready');
       }
     });
 
@@ -129,18 +193,13 @@ function PageInner() {
       setStatus('idle');
     });
 
-    const q =
-      qualityQuery.startsWith('l') ? (AvatarQuality?.Low || 'low') :
-      qualityQuery.startsWith('h') ? (AvatarQuality?.High || 'high') :
-                                     (AvatarQuality?.Medium || 'medium');
-
     await avatar.createStartAvatar({
       avatarName,
-      quality: q,
+      quality: AvatarQuality?.High || 'high',
       welcomeMessage: '',
     });
 
-    // helper to speak (REPEAT mode)
+    // helper to speak
     async function speak(text) {
       if (!text) return;
       const payload = TaskType
@@ -148,9 +207,33 @@ function PageInner() {
         : { text, taskType: 'REPEAT' };
       try { await avatar.speak(payload); } catch {}
     }
+    // store on window for quick manual tests
+    window.__avatarSpeak = speak;
+  }, [avatarName, tryPlay]);
 
-    window.__avatarSpeak = speak; // quick manual test hook
-  }, [avatarName, qualityQuery]);
+  // Speech recognition
+  const startRec = useCallback(() => {
+    if (recRef.current) return; // already running
+    const rec = makeRecognizer(async (txt) => {
+      push('user', txt);
+      try {
+        const id = await ensureChat();
+        const reply = await send(id, txt);
+        push('assistant', reply);
+        try { await window.__avatarSpeak?.(reply); } catch {}
+      } catch (err) {
+        push('system', `Message failed${err?.status ? ` (${err.status})` : ''}. Please try again.`);
+      }
+    });
+    if (!rec) return; // not supported
+    recRef.current = rec;
+    try { rec.start(); } catch {}
+  }, [ensureChat, send, push]);
+
+  const stopRec = useCallback(() => {
+    try { recRef.current?.stop?.(); } catch {}
+    recRef.current = null;
+  }, []);
 
   // ------- Submit -------
   const onSubmit = useCallback(async (e) => {
@@ -163,12 +246,9 @@ function PageInner() {
       const id = await ensureChat();
       const reply = await send(id, text);
       push('assistant', reply);
-      // lip-sync: speak exactly reply
       try { await window.__avatarSpeak?.(reply); } catch {}
     } catch (err) {
-      const note = `Message failed${err?.status ? ` (${err.status})` : ''}. Please try again.`;
-      push('system', note);
-      setError(note);
+      push('system', `Message failed${err?.status ? ` (${err.status})` : ''}. Please try again.`);
     }
   }, [input, ensureChat, send, push]);
 
@@ -184,6 +264,7 @@ function PageInner() {
         if (!autostart) return;
         await begin();
         if (!cancelled) await ensureChat();
+        if (!cancelled && micOn) startRec();
       } catch (e) {
         if (!cancelled) {
           setError(e?.message || 'Startup error');
@@ -191,81 +272,183 @@ function PageInner() {
         }
       }
     })();
-    return () => { cancelled = true; stopAvatar(); };
-  }, [autostart, begin, ensureChat, stopAvatar]);
+    return () => { cancelled = true; stopRec(); stopAvatar(); };
+  }, [autostart, begin, ensureChat, stopAvatar, micOn, startRec]);
 
-  // ------- Layout calculations -------
-  const isCompact = layout === 'compact';
-  const rows = isCompact && videoFirst ? '60% 40%' : '55% 45%';
+  // auto-scroll chat
+  const chatEndRef = useRef(null);
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }, [messages.length]);
 
+  // ------- UI handlers -------
+  const onToggleSound = useCallback(async () => {
+    setSoundOn((s) => !s);
+    if (videoRef.current) {
+      videoRef.current.muted = soundOn; // toggle
+      try { await videoRef.current.play(); } catch {}
+    }
+    setNeedGesture(false);
+  }, [soundOn]);
+
+  const onToggleMic = useCallback(() => {
+    setMicOn((m) => !m);
+    if (micOn) stopRec(); else startRec();
+  }, [micOn, startRec, stopRec]);
+
+  const onRestart = useCallback(async () => {
+    try { window.localStorage.removeItem(LS_CHAT_KEY); } catch {}
+    setChatId('');
+    setMessages([]);
+    await stopAvatar();
+    await begin();
+    await ensureChat();
+    if (micOn) startRec();
+  }, [begin, ensureChat, micOn, startRec, stopAvatar]);
+
+  const onFullscreen = useCallback(async () => {
+    const el = containerRef.current;
+    if (!el) return;
+    try {
+      if (!document.fullscreenElement) {
+        await el.requestFullscreen?.();
+        setIsFullscreen(true);
+      } else {
+        await document.exitFullscreen?.();
+        setIsFullscreen(false);
+      }
+    } catch {}
+  }, []);
+
+  const onGestureEnable = useCallback(async () => {
+    setNeedGesture(false);
+    if (!videoRef.current) return;
+    videoRef.current.muted = false;
+    try { await videoRef.current.play(); } catch {}
+  }, []);
+
+  // ------- Layout classes -------
+  const shellClass = [
+    'avatar-shell',
+    layoutCompact ? 'layout-compact' : '',
+    videoFirst ? 'video-first' : ''
+  ].join(' ').trim();
+
+  // ------- Render -------
   return (
-    <div style={{
-      width: '100%',
-      height: '100%',
-      boxSizing: 'border-box',
-      display: 'grid',
-      gridTemplateRows: rows,
-      gap: 10,
-      padding: 10,
-      background: '#0f1220',
-      color: '#e9ecf1',
-      fontFamily: 'Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, Apple Color Emoji, Segoe UI Emoji'
-    }}>
-      {/* Video */}
-      <div style={{ position:'relative', borderRadius:12, overflow:'hidden', background:'#000' }}>
+    <div
+      ref={containerRef}
+      className={shellClass}
+      style={{
+        width: 'min(480px, 95vw)',
+        height: 'min(720px, calc(100vh - 24px))',
+        display: 'grid',
+        gridTemplateRows: '55% 45%', // video / chat
+        gap: 10,
+        padding: 10,
+        boxSizing: 'border-box',
+        background: '#0f1220',
+        color: '#e9ecf1',
+        borderRadius: 12,
+      }}
+    >
+      {/* Video with controls overlay */}
+      <div style={{ position: 'relative', borderRadius: 12, overflow: 'hidden', background: '#000' }}>
         <video
           ref={videoRef}
           playsInline
           autoPlay
-          muted
-          style={{ width:'100%', height:'100%', objectFit:'cover', background:'#000' }}
+          muted={!soundOn}
+          style={{ width: '100%', height: '100%', objectFit: 'cover', background: '#000' }}
         />
+
+        {/* Status veil */}
         {status !== 'ready' && (
           <div style={{
-            position:'absolute', inset:0, display:'grid', placeItems:'center',
-            color:'#fff', background:'rgba(0,0,0,.35)', fontWeight:700
+            position: 'absolute', inset: 0, display: 'grid', placeItems: 'center',
+            color: '#fff', background: 'rgba(0,0,0,.35)', fontWeight: 700
           }}>
             {status === 'idle' ? 'Idle' : status === 'connecting' ? 'Connecting…' : 'Error'}
           </div>
         )}
+
+        {/* “Tap to enable sound” if autoplay blocked */}
+        {needGesture && (
+          <button
+            onClick={onGestureEnable}
+            style={{
+              position: 'absolute', inset: 0, background: 'rgba(0,0,0,.55)',
+              color: '#fff', fontWeight: 700, border: '0', cursor: 'pointer'
+            }}
+          >
+            Tap to enable sound
+          </button>
+        )}
+
+        {/* Controls row */}
+        <div style={{
+          position:'absolute', top:8, right:8, display:'flex', gap:6,
+          background:'rgba(15,18,32,.55)', padding:'6px 8px',
+          border:'1px solid rgba(255,255,255,.12)', borderRadius:10
+        }}>
+          <button
+            title={micOn ? 'Mic on — click to stop listening' : 'Mic off — click to start listening'}
+            onClick={onToggleMic}
+            style={btnStyle}
+          >
+            {micOn ? <Icon.MicOn/> : <Icon.MicOff/>}
+          </button>
+          <button
+            title={soundOn ? 'Mute' : 'Unmute'}
+            onClick={onToggleSound}
+            style={btnStyle}
+          >
+            {soundOn ? <Icon.Volume/> : <Icon.Mute/>}
+          </button>
+          <button title="Restart conversation" onClick={onRestart} style={btnStyle}><Icon.Restart/></button>
+          <button title={isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'} onClick={onFullscreen} style={btnStyle}><Icon.Full/></button>
+        </div>
       </div>
 
       {/* Chat */}
       <div style={{
-        borderRadius:12, overflow:'hidden', border:'1px solid #1f2430',
-        background:'#0f1220', display:'grid', gridTemplateRows:'1fr auto'
+        borderRadius: 12, overflow: 'hidden', border: '1px solid #1f2430',
+        background: '#0f1220', display: 'grid', gridTemplateRows: '1fr auto'
       }}>
-        <div ref={chatScrollRef} style={{ padding:'10px 12px', overflowY:'auto', fontSize:14 }}>
+        <div style={{ padding: '10px 12px', overflowY: 'auto', fontSize: 14 }}>
           {messages.length === 0 ? (
-            <div style={{ opacity:.75 }}>Type a message to start the conversation.</div>
+            <div style={{ opacity: .75 }}>
+              Talk to the agent — we’re listening. You can also type below.
+            </div>
           ) : messages.map((m,i) => (
-            <div key={i} style={{ marginBottom:10 }}>
+            <div key={i} style={{ marginBottom: 10 }}>
               <div style={{
-                fontWeight:700, fontSize:12,
+                fontWeight: 700, fontSize: 12,
                 color: m.role==='user' ? '#60a5fa' : m.role==='assistant' ? '#34d399' : '#e879f9'
               }}>
                 {m.role === 'assistant' ? 'Assistant' : m.role[0].toUpperCase()+m.role.slice(1)}
               </div>
-              <div style={{ whiteSpace:'pre-wrap' }}>{m.text}</div>
+              <div style={{ whiteSpace: 'pre-wrap' }}>{m.text}</div>
             </div>
           ))}
+          <div ref={chatEndRef} />
         </div>
-        <form onSubmit={onSubmit} style={{ display:'flex', gap:8, padding:10, borderTop:'1px solid #1f2430' }}>
+        <form onSubmit={onSubmit} style={{ display: 'flex', gap: 8, padding: 10, borderTop: '1px solid #1f2430' }}>
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder="Type your message…"
             style={{
-              flex:1, borderRadius:10, border:'1px solid #2a3142',
-              background:'#12172a', color:'#e9ecf1', padding:'10px 12px', outline:'none'
+              flex: 1, borderRadius: 10, border: '1px solid #2a3142',
+              background: '#12172a', color: '#e9ecf1', padding: '10px 12px', outline: 'none'
             }}
           />
           <button
             type="submit"
             disabled={!input.trim()}
             style={{
-              padding:'10px 14px', borderRadius:10, border:'1px solid #2563eb',
-              background:'#2563eb', color:'#fff', fontWeight:700,
+              padding: '10px 14px', borderRadius: 10, border: '1px solid #2563eb',
+              background: '#2563eb', color: '#fff', fontWeight: 700,
               cursor: input.trim() ? 'pointer' : 'default'
             }}
           >Send</button>
@@ -274,9 +457,9 @@ function PageInner() {
 
       {error && (
         <div style={{
-          position:'absolute', left:10, right:10, bottom:10,
-          background:'#2a1215', border:'1px solid #5c1a1e',
-          color:'#ffd4d6', borderRadius:10, padding:'8px 10px', fontSize:12
+          position: 'absolute', left: 10, right: 10, bottom: 10,
+          background: '#2a1215', border: '1px solid #5c1a1e',
+          color: '#ffd4d6', borderRadius: 10, padding: '8px 10px', fontSize: 12
         }}>
           {error}
         </div>
@@ -284,6 +467,18 @@ function PageInner() {
     </div>
   );
 }
+
+const btnStyle = {
+  background: 'transparent',
+  border: '1px solid rgba(255,255,255,.12)',
+  color: '#fff',
+  width: 36,
+  height: 32,
+  display: 'grid',
+  placeItems: 'center',
+  borderRadius: 8,
+  cursor: 'pointer'
+};
 
 export default function EmbedPage() {
   return (
