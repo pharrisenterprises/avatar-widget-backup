@@ -2,13 +2,15 @@
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
+function json(data, init = {}) {
+  const headers = { 'Cache-Control': 'no-store', ...(init.headers || {}) };
+  return Response.json(data, { ...init, headers });
+}
+
 export async function POST(req) {
   const apiKey = process.env.RETELL_API_KEY;
   if (!apiKey) {
-    return Response.json(
-      { ok: false, status: 500, error: 'CONFIG' },
-      { headers: { 'Cache-Control': 'no-store' } }
-    );
+    return json({ ok: false, status: 500, code: 'CONFIG', detail: { hasApiKey: !!apiKey } }, { status: 500 });
   }
 
   const body = await req.json().catch(() => ({}));
@@ -16,10 +18,7 @@ export async function POST(req) {
   const text = (body?.text || '').toString();
 
   if (!chatId || !text) {
-    return Response.json(
-      { ok: false, status: 400, error: 'BAD_INPUT' },
-      { headers: { 'Cache-Control': 'no-store' } }
-    );
+    return json({ ok: false, status: 400, code: 'BAD_INPUT', detail: { chatId: !!chatId, hasText: !!text } }, { status: 400 });
   }
 
   try {
@@ -33,23 +32,16 @@ export async function POST(req) {
       body: JSON.stringify({ chat_id: chatId, content: text }),
     });
 
-    const j = await r.json().catch(() => ({}));
+    let j = {};
+    try { j = await r.json(); } catch { j = {}; }
+
     if (!r.ok) {
-      return Response.json(
-        { ok: false, status: r.status, error: j },
-        { headers: { 'Cache-Control': 'no-store' } }
-      );
+      return json({ ok: false, status: r.status, code: 'RETELL_SEND_FAILED', detail: j }, { status: r.status });
     }
 
     const reply = j?.messages?.[0]?.content || '';
-    return Response.json(
-      { ok: true, reply },
-      { headers: { 'Cache-Control': 'no-store' } }
-    );
-  } catch {
-    return Response.json(
-      { ok: false, status: 500, error: 'NETWORK' },
-      { headers: { 'Cache-Control': 'no-store' } }
-    );
+    return json({ ok: true, reply });
+  } catch (err) {
+    return json({ ok: false, status: 500, code: 'NETWORK', detail: String(err || '') }, { status: 500 });
   }
 }
