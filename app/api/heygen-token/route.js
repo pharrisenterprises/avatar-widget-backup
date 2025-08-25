@@ -2,55 +2,47 @@
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-// Minimal CORS for your website, keeps things simple and permissive
-function corsHeaders(origin) {
-  const allow = process.env.ALLOWED_ORIGINS || '*';
-  const allowOrigin =
-    allow === '*'
-      ? '*'
-      : (allow.split(',').map(s => s.trim()).includes(origin) ? origin : '');
-  return {
-    'Access-Control-Allow-Origin': allowOrigin || '*',
-    'Access-Control-Allow-Methods': 'GET,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-    'Access-Control-Max-Age': '86400',
-  };
-}
+export async function GET() {
+  const apiKey = process.env.HEYGEN_API_KEY;
+  if (!apiKey) {
+    return Response.json(
+      { ok: false, status: 500, error: 'MISSING_HEYGEN_API_KEY' },
+      { headers: { 'Cache-Control': 'no-store' } },
+    );
+  }
 
-export async function OPTIONS(req) {
-  return new Response(null, { status: 204, headers: corsHeaders(req.headers.get('origin') || '') });
-}
-
-export async function GET(req) {
-  const origin = req.headers.get('origin') || '';
-  const headers = { ...corsHeaders(origin), 'Cache-Control': 'no-store' };
-
-  // Preferred: ephemeral token from HeyGen (if your tenant supports it).
-  // If not available, fall back to your API key as the token (works with SDK).
-  const apiKey = process.env.HEYGEN_API_KEY || '';
-  const preferEphemeral = process.env.HEYGEN_EPHEMERAL !== '0';
-
+  // 1) Try to mint a short-lived streaming token (best practice)
   try {
-    if (preferEphemeral && apiKey) {
-      const r = await fetch('https://api.heygen.com/v1/streaming.token', {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${apiKey}` },
-        cache: 'no-store',
-      });
-      if (r.ok) {
-        const j = await r.json().catch(() => ({}));
-        const token = j?.data?.token || j?.token || '';
-        if (token) return Response.json({ ok: true, token }, { headers });
-      }
+    const r = await fetch('https://api.heygen.com/v1/streaming.token', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      cache: 'no-store',
+      body: JSON.stringify({ ttl: 3600 }), // 1 hour
+    });
+
+    // Some tenants return 404/400 if not enabled — safely fall back
+    const j = await r.json().catch(() => ({}));
+    const token =
+      j?.token ||
+      j?.data?.token ||
+      (typeof j === 'string' ? j : '');
+
+    if (r.ok && token) {
+      return Response.json(
+        { ok: true, token, fallback: false },
+        { headers: { 'Cache-Control': 'no-store' } },
+      );
     }
   } catch {
-    // ignore and fall back
+    // ignore and fall back below
   }
 
-  // Fallback: return your API key directly as the token.
-  if (apiKey) {
-    return Response.json({ ok: true, token: apiKey, fallback: true }, { headers });
-  }
-
-  return Response.json({ ok: false, error: 'NO_TOKEN' }, { status: 500, headers });
+  // 2) Fallback: return API key (works with SDK, but exposes a secret to the browser)
+  return Response.json(
+    { ok: true, token: apiKey, fallback: true },
+    { headers: { 'Cache-Control': 'no-store' } },
+  );
 }
