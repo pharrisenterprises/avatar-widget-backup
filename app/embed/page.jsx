@@ -91,12 +91,10 @@ function PageInner() {
   }, []);
 
   // ---------- Audio / permissions ----------
-  // Prompt for mic access on load (no extra UI; if denied, we keep going).
   useEffect(() => {
     (async () => {
       try {
         const s = await navigator.mediaDevices.getUserMedia({ audio: true });
-        // We only needed the permission prompt — stop tracks to avoid capturing.
         s.getTracks().forEach(t => t.stop());
       } catch {
         // ignore; user can still type
@@ -105,7 +103,6 @@ function PageInner() {
   }, []);
 
   const tryStartAudible = useCallback(async () => {
-    // Attempt to play with sound; if blocked, show slim "Enable sound" strip.
     try {
       if (!videoRef.current) return;
       videoRef.current.muted = false;
@@ -131,7 +128,6 @@ function PageInner() {
     setStatus('connecting');
     setError('');
 
-    // token
     const tr = await fetch('/api/heygen-token', { cache: 'no-store' });
     const tj = await tr.json().catch(() => ({}));
     const token = tj?.token || tj?.data?.token || tj?.accessToken || '';
@@ -154,7 +150,6 @@ function PageInner() {
       const stream = evt?.detail;
       if (videoRef.current && stream instanceof MediaStream) {
         videoRef.current.srcObject = stream;
-        // Try to start audible immediately. If blocked, show "Enable sound".
         await tryStartAudible();
         setStatus('ready');
       }
@@ -173,7 +168,6 @@ function PageInner() {
       welcomeMessage: '',
     });
 
-    // lip-sync helper
     async function speak(text) {
       if (!text) return;
       const payload = TaskType
@@ -238,7 +232,7 @@ function PageInner() {
           ref={videoRef}
           playsInline
           autoPlay
-          muted={false} // we will try to unmute in code; browser may re-block, then show strip
+          muted={false}
           style={{ width: '100%', height: '100%', objectFit: 'cover', background: '#000' }}
         />
         {status !== 'ready' && (
@@ -251,8 +245,6 @@ function PageInner() {
             {status === 'idle' ? 'Idle' : status === 'connecting' ? 'Connecting…' : 'Error'}
           </div>
         )}
-
-        {/* If autoplay with sound was blocked, show a slim “Enable sound” strip */}
         {needUnmute && (
           <button
             onClick={async () => {
@@ -304,7 +296,10 @@ function PageInner() {
             ))
           )}
         </div>
-        <form onSubmit={onSubmit} style={{ display: 'flex', gap: 8, padding: 10, borderTop: '1px solid '#1f2430' }}>
+        <form
+          onSubmit={onSubmit}
+          style={{ display: 'flex', gap: 8, padding: 10, borderTop: '1px solid #1f2430' }}
+        >
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
