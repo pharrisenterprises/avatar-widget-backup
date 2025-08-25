@@ -16,7 +16,8 @@ const nextConfig = {
               "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
               "font-src 'self' data: https://fonts.gstatic.com",
               "media-src 'self' blob: data:",
-              "frame-ancestors 'self'",
+              // ⬇️ Changed: allow parents from env (and self)
+              `frame-ancestors 'self' ${process.env.ALLOWED_PARENTS || ''}`,
             ].join('; ')
           }
         ]
