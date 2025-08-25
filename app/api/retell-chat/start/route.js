@@ -2,25 +2,10 @@
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-function corsHeaders(origin) {
-  const allow = process.env.ALLOWED_ORIGINS || '*';
-  const allowOrigin =
-    allow === '*'
-      ? '*'
-      : allow.split(',').map(s => s.trim()).includes(origin)
-      ? origin
-      : '';
-  return {
-    'Access-Control-Allow-Origin': allowOrigin || '*',
-    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-    'Access-Control-Max-Age': '86400',
-  };
-}
+import { corsHeaders, preflight } from '../../_cors';
 
 export async function OPTIONS(req) {
-  const h = corsHeaders(req.headers.get('origin') || '');
-  return new Response(null, { status: 204, headers: h });
+  return preflight(req);
 }
 
 export async function GET(req) {
