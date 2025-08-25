@@ -12,8 +12,6 @@ import { useSearchParams } from 'next/navigation';
 import { loadHeygenSdk } from '../lib/loadHeygenSdk';
 
 const LS_CHAT_KEY = 'retell_chat_id';
-
-// Reconnect schedule: try fast, then back off a bit
 const RECONNECT_MS = [1500, 2500, 4000, 6000, 8000];
 
 function PageInner() {
@@ -22,27 +20,27 @@ function PageInner() {
   const compact = useMemo(() => sp?.get('layout') === 'compact', [sp]);
   const videoFirst = useMemo(() => sp?.get('videoFirst') === '1', [sp]);
 
-  // ---- element refs
+  // ------- refs
   const shellRef = useRef(null);
   const videoRef = useRef(null);
-  const canvasRef = useRef(null);     // freeze frame canvas during reconnect
-  const avatarRef = useRef(null);     // HeyGen StreamingAvatar
+  const canvasRef = useRef(null); // freeze-frame canvas
+  const avatarRef = useRef(null); // HeyGen StreamingAvatar
+  const beginRef = useRef(null);  // to avoid TDZ between scheduleReconnect <-> begin
   const reconnectIdxRef = useRef(0);
-  const reconnectTRef = useRef(null);
+  const reconnectTimerRef = useRef(null);
   const keepTryingRef = useRef(true);
 
-  // ---- state
+  // ------- state
   const [status, setStatus] = useState('idle'); // idle | connecting | ready | error | reconnecting
   const [error, setError] = useState('');
   const [chatId, setChatId] = useState('');
-  const [messages, setMessages] = useState([]); // {role, text}
+  const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [speakerMuted, setSpeakerMuted] = useState(false);
 
-  // env
   const avatarName = process.env.NEXT_PUBLIC_HEYGEN_AVATAR_ID || '';
 
-  // util
+  // ------- utils
   const push = useCallback((role, text) => {
     setMessages((p) => [...p, { role, text }]);
   }, []);
@@ -51,19 +49,14 @@ function PageInner() {
     const scroller = document.getElementById('chat-scroll');
     if (scroller) scroller.scrollTop = scroller.scrollHeight;
   }, []);
-  useEffect(() => {
-    scrollChatToBottom();
-  }, [messages, scrollChatToBottom]);
+  useEffect(() => { scrollChatToBottom(); }, [messages, scrollChatToBottom]);
 
-  // ---- Retell helpers
+  // ------- Retell
   const ensureChat = useCallback(async () => {
     if (chatId) return chatId;
     try {
       const s = window.localStorage.getItem(LS_CHAT_KEY);
-      if (s) {
-        setChatId(s);
-        return s;
-      }
+      if (s) { setChatId(s); return s; }
     } catch {}
     const r = await fetch('/api/retell-chat/start', { cache: 'no-store' });
     const j = await r.json().catch(() => ({}));
@@ -93,17 +86,14 @@ function PageInner() {
     return j.reply || '';
   }, []);
 
-  // ---- freeze frame helpers
+  // ------- freeze-frame helpers
   const showFreezeFrame = useCallback(() => {
     const v = videoRef.current;
     const c = canvasRef.current;
     if (!v || !c) return;
-
     const w = v.videoWidth || v.clientWidth || 640;
     const h = v.videoHeight || v.clientHeight || 360;
-    c.width = w;
-    c.height = h;
-
+    c.width = w; c.height = h;
     try {
       const ctx = c.getContext('2d');
       if (ctx) {
@@ -116,40 +106,32 @@ function PageInner() {
 
   const hideFreezeFrame = useCallback(() => {
     const c = canvasRef.current;
-    if (c) {
-      c.style.opacity = '0';
-      c.style.visibility = 'hidden';
-    }
+    if (c) { c.style.opacity = '0'; c.style.visibility = 'hidden'; }
   }, []);
 
-  // ---- HeyGen: stop & reconnect loop
-  const clearReconnectTimer = useCallback(() => {
-    clearTimeout(reconnectTRef.current);
-    reconnectTRef.current = null;
-  }, []);
-
+  // ------- reconnect orchestration (defined BEFORE begin; uses beginRef)
   const scheduleReconnect = useCallback(() => {
     if (!keepTryingRef.current) return;
-    const delay = RECONNECT_MS[Math.min(reconnectIdxRef.current, RECONNECT_MS.length - 1)];
-    reconnectIdxRef.current += 1;
     setStatus('reconnecting');
     showFreezeFrame();
-    clearReconnectTimer();
-    reconnectTRef.current = setTimeout(async () => {
-      try {
-        await begin(true); // soft begin (don’t clear UI)
-      } catch {
-        scheduleReconnect();
-      }
-    }, delay);
-  }, [begin, clearReconnectTimer, showFreezeFrame]);
+    const idx = Math.min(reconnectIdxRef.current, RECONNECT_MS.length - 1);
+    const delay = RECONNECT_MS[idx];
+    reconnectIdxRef.current = idx + 1;
 
-  // ---- HeyGen: begin
+    clearTimeout(reconnectTimerRef.current);
+    reconnectTimerRef.current = setTimeout(async () => {
+      const fn = beginRef.current;
+      if (!fn) return; // should never happen
+      try { await fn(true); } catch { scheduleReconnect(); }
+    }, delay);
+  }, [showFreezeFrame]);
+
+  // ------- HeyGen: begin (defined AFTER scheduleReconnect; calls it in events)
   const begin = useCallback(async (soft = false) => {
     setError('');
     setStatus(soft ? 'reconnecting' : 'connecting');
 
-    // Token
+    // token
     const tr = await fetch('/api/heygen-token', { cache: 'no-store' });
     const tj = await tr.json().catch(() => ({}));
     const token = tj?.token || tj?.data?.token || tj?.accessToken || '';
@@ -159,7 +141,7 @@ function PageInner() {
     if (!sdk?.StreamingAvatar) throw new Error('SDK');
     const { StreamingAvatar, StreamingEvents, AvatarQuality, TaskType } = sdk;
 
-    // Clean any prior instance without blanking the video (we’ll freeze frame)
+    // stop previous without blanking frame
     try { await avatarRef.current?.stopAvatar?.(); } catch {}
     avatarRef.current = null;
 
@@ -171,7 +153,7 @@ function PageInner() {
       const v = videoRef.current;
       if (v && stream instanceof MediaStream) {
         v.srcObject = stream;
-        v.muted = speakerMuted; // reflect current state
+        v.muted = speakerMuted;
         v.onloadedmetadata = () => {
           v.play().catch(() => {});
           hideFreezeFrame();
@@ -182,7 +164,6 @@ function PageInner() {
     });
 
     avatar.on(StreamingEvents.STREAM_DISCONNECTED, () => {
-      // keep last frame visible and try to come back
       scheduleReconnect();
     });
 
@@ -193,7 +174,6 @@ function PageInner() {
       welcomeMessage: '',
     });
 
-    // Speak helper (REPEAT exact captions)
     async function speak(text) {
       if (!text) return;
       const payload = TaskType
@@ -201,21 +181,23 @@ function PageInner() {
         : { text, taskType: 'REPEAT' };
       try { await avatar.speak(payload); } catch {}
     }
-    // expose for local testing
     window.__avatarSpeak = speak;
   }, [avatarName, hideFreezeFrame, scheduleReconnect, speakerMuted]);
 
-  // ---- mic permission (show native prompt once)
+  // bind begin to ref (breaks any circular references safely)
+  useEffect(() => { beginRef.current = begin; }, [begin]);
+
+  // ------- mic permission
   const ensureMicPermission = useCallback(async () => {
     try {
       const s = await navigator.mediaDevices.getUserMedia({ audio: true });
       s.getTracks().forEach((t) => t.stop());
     } catch {
-      // user may decline; avatar still works with text, audio may be muted by browser
+      // user declined — text still works; audio may require click
     }
   }, []);
 
-  // ---- submit
+  // ------- submit
   const onSubmit = useCallback(async (e) => {
     e?.preventDefault?.();
     const text = (input || '').trim();
@@ -232,11 +214,10 @@ function PageInner() {
     }
   }, [input, ensureChat, send, push]);
 
-  // ---- lifecycle: autostart + teardown
+  // ------- lifecycle
   useEffect(() => {
     keepTryingRef.current = true;
     (async () => {
-      // restore chat id if present
       try {
         const s = window.localStorage.getItem(LS_CHAT_KEY);
         if (s) setChatId(s);
@@ -253,33 +234,26 @@ function PageInner() {
     })();
     return () => {
       keepTryingRef.current = false;
-      clearTimeout(reconnectTRef.current);
+      clearTimeout(reconnectTimerRef.current);
       try { avatarRef.current?.stopAvatar?.(); } catch {}
     };
   }, [autostart, begin, ensureChat, ensureMicPermission]);
 
-  // ---- controls
+  // ------- controls
   const toggleSpeaker = useCallback(async () => {
     const v = videoRef.current;
     if (!v) return;
     const next = !speakerMuted;
     setSpeakerMuted(next);
-    try {
-      v.muted = next;
-      await v.play().catch(() => {});
-    } catch {}
+    try { v.muted = next; await v.play().catch(() => {}); } catch {}
   }, [speakerMuted]);
 
   const restart = useCallback(async () => {
-    clearTimeout(reconnectTRef.current);
+    clearTimeout(reconnectTimerRef.current);
     reconnectIdxRef.current = 0;
     showFreezeFrame();
-    try {
-      await begin(true);
-    } catch {
-      scheduleReconnect();
-    }
-  }, [begin, scheduleReconnect, showFreezeFrame]);
+    try { await beginRef.current?.(true); } catch { scheduleReconnect(); }
+  }, [scheduleReconnect, showFreezeFrame]);
 
   const fullscreen = useCallback(async () => {
     const el = shellRef.current;
@@ -290,7 +264,6 @@ function PageInner() {
     } catch {}
   }, []);
 
-  // ---- classes for requested layout hint
   const rootClass = [
     'avatar-shell',
     compact ? 'layout-compact' : '',
@@ -309,50 +282,58 @@ function PageInner() {
         gap: 12,
         padding: 12,
         boxSizing: 'border-box',
+        position: 'relative',
       }}
     >
-      {/* VIDEO AREA */}
+      {/* VIDEO */}
       <div style={{ position: 'relative', borderRadius: 12, overflow: 'hidden', background: '#000' }}>
-        {/* controls (top-left) */}
+        {/* controls */}
         <div style={{
           position: 'absolute', top: 10, left: 10, display: 'flex', gap: 8, zIndex: 3,
           background: 'rgba(15,18,32,.55)', padding: '6px 8px', borderRadius: 10, backdropFilter: 'blur(4px)'
         }}>
-          {/* mic badge (visual only; permission happens automatically) */}
-          <button title="Microphone allowed" style={iconBtnStyle} aria-label="Mic">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M12 14a3 3 0 0 0 3-3V7a3 3 0 0 0-6 0v4a3 3 0 0 0 3 3Z" stroke="#fff" strokeWidth="2"/><path d="M5 11a7 7 0 0 0 14 0" stroke="#fff" strokeWidth="2"/></svg>
+          {/* mic indicator */}
+          <button title="Microphone" style={iconBtnStyle} aria-label="Mic">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+              <path d="M12 14a3 3 0 0 0 3-3V7a3 3 0 0 0-6 0v4a3 3 0 0 0 3 3Z" stroke="#fff" strokeWidth="2"/>
+              <path d="M5 11a7 7 0 0 0 14 0" stroke="#fff" strokeWidth="2"/>
+            </svg>
           </button>
-          {/* speaker mute/unmute */}
+          {/* speaker */}
           <button onClick={toggleSpeaker} title={speakerMuted ? 'Unmute speaker' : 'Mute speaker'} style={iconBtnStyle} aria-label="Speaker">
             {speakerMuted ? (
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M4 9v6h4l5 4V5L8 9H4Z" stroke="#fff" strokeWidth="2"/><path d="m19 5-14 14" stroke="#fff" strokeWidth="2"/></svg>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+                <path d="M4 9v6h4l5 4V5L8 9H4Z" stroke="#fff" strokeWidth="2"/>
+                <path d="m19 5-14 14" stroke="#fff" strokeWidth="2"/>
+              </svg>
             ) : (
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M4 9v6h4l5 4V5L8 9H4Z" stroke="#fff" strokeWidth="2"/><path d="M16 7a5 5 0 0 1 0 10" stroke="#fff" strokeWidth="2"/></svg>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+                <path d="M4 9v6h4l5 4V5L8 9H4Z" stroke="#fff" strokeWidth="2"/>
+                <path d="M16 7a5 5 0 0 1 0 10" stroke="#fff" strokeWidth="2"/>
+              </svg>
             )}
           </button>
           {/* restart */}
           <button onClick={restart} title="Restart session" style={iconBtnStyle} aria-label="Restart">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M3 12a9 9 0 1 0 3-6.7" stroke="#fff" strokeWidth="2"/><path d="M3 5v4h4" stroke="#fff" strokeWidth="2"/></svg>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+              <path d="M3 12a9 9 0 1 0 3-6.7" stroke="#fff" strokeWidth="2"/>
+              <path d="M3 5v4h4" stroke="#fff" strokeWidth="2"/>
+            </svg>
           </button>
           {/* fullscreen */}
           <button onClick={fullscreen} title="Fullscreen" style={iconBtnStyle} aria-label="Fullscreen">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" stroke="#fff" strokeWidth="2"/></svg>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+              <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" stroke="#fff" strokeWidth="2"/>
+            </svg>
           </button>
         </div>
 
-        {/* freeze frame canvas (under controls, over video while reconnecting) */}
+        {/* freeze-frame */}
         <canvas
           ref={canvasRef}
           style={{
-            position: 'absolute',
-            inset: 0,
-            width: '100%',
-            height: '100%',
-            objectFit: 'cover',
-            transition: 'opacity .2s',
-            opacity: 0,
-            visibility: 'hidden',
-            zIndex: 1,
+            position: 'absolute', inset: 0, width: '100%', height: '100%',
+            objectFit: 'cover', transition: 'opacity .2s', opacity: 0, visibility: 'hidden', zIndex: 1
           }}
         />
 
@@ -366,30 +347,25 @@ function PageInner() {
           style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
         />
 
-        {/* status badge (no blackout) */}
+        {/* status badge */}
         {status !== 'ready' && (
           <div style={{
             position: 'absolute', right: 10, top: 10, zIndex: 3,
             background: 'rgba(0,0,0,.5)', color: '#fff', padding: '6px 10px',
             borderRadius: 10, fontWeight: 700
           }}>
-            {status === 'connecting' ? 'Connecting…' :
-             status === 'reconnecting' ? 'Reconnecting…' :
-             status === 'error' ? 'Error' : 'Idle'}
+            {status === 'connecting' ? 'Connecting…'
+              : status === 'reconnecting' ? 'Reconnecting…'
+              : status === 'error' ? 'Error' : 'Idle'}
           </div>
         )}
       </div>
 
-      {/* CHAT AREA */}
+      {/* CHAT */}
       <div style={{
-        borderRadius: 12,
-        overflow: 'hidden',
-        border: '1px solid #1f2430',
-        background: '#0f1220',
-        color: '#e9ecf1',
-        display: 'grid',
-        gridTemplateRows: '1fr auto',
-        minHeight: 180
+        borderRadius: 12, overflow: 'hidden', border: '1px solid #1f2430',
+        background: '#0f1220', color: '#e9ecf1', display: 'grid',
+        gridTemplateRows: '1fr auto', minHeight: 180
       }}>
         <div id="chat-scroll" style={{ padding: '10px 12px', overflowY: 'auto', fontSize: 14 }}>
           {messages.length === 0 ? (
@@ -401,12 +377,10 @@ function PageInner() {
               <div style={{
                 fontWeight: 700, fontSize: 12,
                 color: m.role === 'user' ? '#60a5fa'
-                    : m.role === 'assistant' ? '#34d399'
-                    : '#e879f9'
+                  : m.role === 'assistant' ? '#34d399'
+                  : '#e879f9'
               }}>
-                {m.role === 'assistant' ? 'Assistant'
-                  : m.role === 'system' ? 'System'
-                  : 'User'}
+                {m.role === 'assistant' ? 'Assistant' : m.role === 'system' ? 'System' : 'User'}
               </div>
               <div style={{ whiteSpace: 'pre-wrap' }}>{m.text}</div>
             </div>
@@ -435,7 +409,6 @@ function PageInner() {
         </form>
       </div>
 
-      {/* error toast */}
       {error && (
         <div style={{
           position: 'absolute', left: 16, right: 16, bottom: 16,
@@ -449,7 +422,6 @@ function PageInner() {
   );
 }
 
-// tiny style object for overlay buttons
 const iconBtnStyle = {
   width: 32,
   height: 32,
