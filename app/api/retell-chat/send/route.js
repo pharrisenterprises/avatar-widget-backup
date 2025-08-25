@@ -2,15 +2,31 @@
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-function json(data, init = {}) {
-  const headers = { 'Cache-Control': 'no-store', ...(init.headers || {}) };
-  return Response.json(data, { ...init, headers });
+function corsHeaders(origin) {
+  const allow = process.env.ALLOWED_ORIGINS || '*';
+  const allowOrigin =
+    allow === '*'
+      ? '*'
+      : (allow.split(',').map(s => s.trim()).includes(origin) ? origin : '');
+  return {
+    'Access-Control-Allow-Origin': allowOrigin || '*',
+    'Access-Control-Allow-Methods': 'POST,OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Max-Age': '86400',
+  };
+}
+
+export async function OPTIONS(req) {
+  return new Response(null, { status: 204, headers: corsHeaders(req.headers.get('origin') || '') });
 }
 
 export async function POST(req) {
+  const origin = req.headers.get('origin') || '';
+  const headers = { ...corsHeaders(origin), 'Cache-Control': 'no-store' };
+
   const apiKey = process.env.RETELL_API_KEY;
   if (!apiKey) {
-    return json({ ok: false, status: 500, code: 'CONFIG', detail: { hasApiKey: !!apiKey } }, { status: 500 });
+    return Response.json({ ok: false, status: 500, error: 'CONFIG' }, { headers });
   }
 
   const body = await req.json().catch(() => ({}));
@@ -18,7 +34,7 @@ export async function POST(req) {
   const text = (body?.text || '').toString();
 
   if (!chatId || !text) {
-    return json({ ok: false, status: 400, code: 'BAD_INPUT', detail: { chatId: !!chatId, hasText: !!text } }, { status: 400 });
+    return Response.json({ ok: false, status: 400, error: 'BAD_INPUT' }, { headers });
   }
 
   try {
@@ -32,16 +48,14 @@ export async function POST(req) {
       body: JSON.stringify({ chat_id: chatId, content: text }),
     });
 
-    let j = {};
-    try { j = await r.json(); } catch { j = {}; }
-
+    const j = await r.json().catch(() => ({}));
     if (!r.ok) {
-      return json({ ok: false, status: r.status, code: 'RETELL_SEND_FAILED', detail: j }, { status: r.status });
+      return Response.json({ ok: false, status: r.status, error: j }, { headers });
     }
 
     const reply = j?.messages?.[0]?.content || '';
-    return json({ ok: true, reply });
-  } catch (err) {
-    return json({ ok: false, status: 500, code: 'NETWORK', detail: String(err || '') }, { status: 500 });
+    return Response.json({ ok: true, reply }, { headers });
+  } catch {
+    return Response.json({ ok: false, status: 500, error: 'NETWORK' }, { headers });
   }
 }
