@@ -2,20 +2,20 @@
 'use client';
 
 import React, {
-  Suspense,
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
+  Suspense,
 } from 'react';
 import { loadHeygenSdk } from '../lib/loadHeygenSdk';
 
 const LS_CHAT_KEY = 'retell_chat_id';
 
-// D-ID-like compact footprint
-const PANEL_W = 360;
-const PANEL_H = 600; // 50/50: top video ~300px, bottom chat ~300px
+// Compact footprint, D-ID-ish
+const PANEL_W = 340;
+const PANEL_H = 560; // ~280px video + ~280px chat
 
 function PageInner() {
   const videoRef = useRef(null);
@@ -27,18 +27,14 @@ function PageInner() {
   const [chatId, setChatId] = useState('');
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
-
   const [needUnmute, setNeedUnmute] = useState(false);
-  const [speakerOn, setSpeakerOn] = useState(true);
-  const [micOn, setMicOn] = useState(true);
 
-  // Always read once
   const avatarName = useMemo(
     () => process.env.NEXT_PUBLIC_HEYGEN_AVATAR_ID || '',
     []
   );
 
-  // auto-scroll chat to bottom on new messages
+  // auto-scroll chat on new messages
   useEffect(() => {
     const el = chatScrollRef.current;
     if (!el) return;
@@ -49,7 +45,7 @@ function PageInner() {
     setMessages((p) => [...p, { role, text: String(text || '') }]);
   }, []);
 
-  // ---------- RETELL ----------
+  // ---------- Retell ----------
   const restoreChat = useCallback(() => {
     try {
       const s = window.localStorage.getItem(LS_CHAT_KEY);
@@ -94,36 +90,31 @@ function PageInner() {
     return j.reply || '';
   }, []);
 
-  // ---------- Audio helpers ----------
-  // Try to get mic permission at load (non-blocking if denied).
+  // ---------- Audio / permissions ----------
+  // Prompt for mic access on load (no extra UI; if denied, we keep going).
   useEffect(() => {
     (async () => {
-      if (!micOn) return;
       try {
-        await navigator.mediaDevices.getUserMedia({ audio: true });
+        const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+        // We only needed the permission prompt — stop tracks to avoid capturing.
+        s.getTracks().forEach(t => t.stop());
       } catch {
-        // If denied, keep going. We only needed the permission prompt early.
-        setMicOn(false);
+        // ignore; user can still type
       }
     })();
-  }, [micOn]);
+  }, []);
 
-  const tryUnmuteOutput = useCallback(async () => {
+  const tryStartAudible = useCallback(async () => {
+    // Attempt to play with sound; if blocked, show slim "Enable sound" strip.
     try {
       if (!videoRef.current) return;
-      videoRef.current.muted = !speakerOn;
-      if (speakerOn) {
-        await videoRef.current.play();
-      } else {
-        // If muted, play is usually allowed.
-        await videoRef.current.play().catch(() => {});
-      }
+      videoRef.current.muted = false;
+      await videoRef.current.play();
       setNeedUnmute(false);
-    } catch (e) {
-      // Autoplay with sound was blocked. Show a small unmute strip.
+    } catch {
       setNeedUnmute(true);
     }
-  }, [speakerOn]);
+  }, []);
 
   // ---------- HeyGen ----------
   const stopAvatar = useCallback(async () => {
@@ -163,8 +154,8 @@ function PageInner() {
       const stream = evt?.detail;
       if (videoRef.current && stream instanceof MediaStream) {
         videoRef.current.srcObject = stream;
-        // Attempt audible playback right away; fall back to “Enable sound” if blocked.
-        await tryUnmuteOutput();
+        // Try to start audible immediately. If blocked, show "Enable sound".
+        await tryStartAudible();
         setStatus('ready');
       }
     });
@@ -182,7 +173,7 @@ function PageInner() {
       welcomeMessage: '',
     });
 
-    // helper on window for lip-sync
+    // lip-sync helper
     async function speak(text) {
       if (!text) return;
       const payload = TaskType
@@ -191,9 +182,9 @@ function PageInner() {
       try { await avatar.speak(payload); } catch {}
     }
     window.__avatarSpeak = speak;
-  }, [avatarName, tryUnmuteOutput]);
+  }, [avatarName, tryStartAudible]);
 
-  // Kick everything off immediately.
+  // Auto-start the whole pipeline
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -210,7 +201,7 @@ function PageInner() {
     return () => { alive = false; stopAvatar(); };
   }, [begin, ensureChat, stopAvatar]);
 
-  // ---------- Submit (text) ----------
+  // ---------- Submit ----------
   const onSubmit = useCallback(async (e) => {
     e?.preventDefault?.();
     const text = (input || '').trim();
@@ -234,7 +225,7 @@ function PageInner() {
         width: PANEL_W,
         height: PANEL_H,
         display: 'grid',
-        gridTemplateRows: '1fr 1fr', // 50/50 split
+        gridTemplateRows: '1fr 1fr', // 50/50
         gap: 10,
         padding: 10,
         boxSizing: 'border-box',
@@ -247,8 +238,7 @@ function PageInner() {
           ref={videoRef}
           playsInline
           autoPlay
-          // We'll flip muted on/off inside tryUnmuteOutput
-          muted={!speakerOn}
+          muted={false} // we will try to unmute in code; browser may re-block, then show strip
           style={{ width: '100%', height: '100%', objectFit: 'cover', background: '#000' }}
         />
         {status !== 'ready' && (
@@ -262,41 +252,7 @@ function PageInner() {
           </div>
         )}
 
-        {/* Small control chips (bottom-left) */}
-        <div style={{ position: 'absolute', left: 8, bottom: 8, display: 'flex', gap: 8 }}>
-          <button
-            onClick={async () => {
-              const next = !speakerOn;
-              setSpeakerOn(next);
-              if (videoRef.current) {
-                videoRef.current.muted = !next;
-                if (next) {
-                  try { await videoRef.current.play(); setNeedUnmute(false); }
-                  catch { setNeedUnmute(true); }
-                }
-              }
-            }}
-            title={speakerOn ? 'Mute' : 'Unmute'}
-            style={chipBtn}
-          >
-            {speakerOn ? '🔊' : '🔈'}
-          </button>
-          <button
-            onClick={async () => {
-              const next = !micOn;
-              setMicOn(next);
-              if (next) {
-                try { await navigator.mediaDevices.getUserMedia({ audio: true }); } catch {}
-              }
-            }}
-            title={micOn ? 'Mic on' : 'Mic off'}
-            style={chipBtn}
-          >
-            {micOn ? '🎙️' : '🔇'}
-          </button>
-        </div>
-
-        {/* If autoplay with sound was blocked, show slender “Enable sound” strip */}
+        {/* If autoplay with sound was blocked, show a slim “Enable sound” strip */}
         {needUnmute && (
           <button
             onClick={async () => {
@@ -306,7 +262,6 @@ function PageInner() {
                   await videoRef.current.play();
                 }
                 setNeedUnmute(false);
-                setSpeakerOn(true);
               } catch {}
             }}
             style={unmuteStrip}
@@ -349,9 +304,78 @@ function PageInner() {
             ))
           )}
         </div>
-        <form onSubmit={onSubmit} style={{ display: 'flex', gap: 8, padding: 10, borderTop: '1px solid #1f2430' }}>
+        <form onSubmit={onSubmit} style={{ display: 'flex', gap: 8, padding: 10, borderTop: '1px solid '#1f2430' }}>
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder="Type your message…"
-            st
+            style={{
+              flex: 1,
+              borderRadius: 10,
+              border: '1px solid #2a3142',
+              background: '#12172a',
+              color: '#e9ecf1',
+              padding: '10px 12px',
+              outline: 'none',
+            }}
+          />
+          <button
+            type="submit"
+            disabled={!input.trim()}
+            style={{
+              padding: '10px 14px',
+              borderRadius: 10,
+              border: '1px solid #2563eb',
+              background: '#2563eb',
+              color: '#fff',
+              fontWeight: 700,
+              cursor: input.trim() ? 'pointer' : 'default',
+            }}
+          >
+            Send
+          </button>
+        </form>
+      </div>
+
+      {error && (
+        <div
+          style={{
+            position: 'absolute',
+            left: 10,
+            right: 10,
+            bottom: 10,
+            background: '#2a1215',
+            border: '1px solid #5c1a1e',
+            color: '#ffd4d6',
+            borderRadius: 10,
+            padding: '8px 10px',
+            fontSize: 12,
+          }}
+        >
+          {error}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const unmuteStrip = {
+  position: 'absolute',
+  left: 0,
+  right: 0,
+  bottom: 0,
+  border: 'none',
+  background: 'rgba(0,0,0,.65)',
+  color: '#fff',
+  fontWeight: 700,
+  padding: '10px 12px',
+  cursor: 'pointer',
+};
+
+export default function EmbedPage() {
+  return (
+    <Suspense fallback={<div style={{ padding: 16 }}>Loading…</div>}>
+      <PageInner />
+    </Suspense>
+  );
+}
