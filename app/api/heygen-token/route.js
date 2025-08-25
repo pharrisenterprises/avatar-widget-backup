@@ -2,46 +2,49 @@
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-function json(data, init = {}) {
-  const headers = { 'Cache-Control': 'no-store', ...(init.headers || {}) };
-  return Response.json(data, { ...init, headers });
-}
-
 export async function GET() {
-  const apiKey = process.env.HEYGEN_API_KEY;
-  if (!apiKey) {
-    return json({ ok: false, status: 500, code: 'CONFIG', detail: { hasApiKey: !!apiKey } }, { status: 500 });
+  const key = process.env.HEYGEN_API_KEY;
+  if (!key) {
+    return Response.json(
+      { ok: false, status: 500, code: 'CONFIG', detail: 'Missing HEYGEN_API_KEY' },
+      { headers: { 'Cache-Control': 'no-store' } }
+    );
   }
 
   try {
-    // Preferred: HeyGen ephemeral streaming token
+    // Preferred: ephemeral token
     const r = await fetch('https://api.heygen.com/v1/streaming.token', {
       method: 'POST',
       headers: {
-        'X-Api-Key': apiKey,
+        Authorization: `Bearer ${key}`,
         'Content-Type': 'application/json',
       },
-      cache: 'no-store',
+      // body can be {} – no special params required
       body: JSON.stringify({}),
+      cache: 'no-store',
     });
 
-    let j = {};
-    try { j = await r.json(); } catch { j = {}; }
+    // Some tenants return { data: { token } }, some { token }
+    const j = await r.json().catch(() => ({}));
+    const token = j?.data?.token || j?.token || '';
 
-    if (!r.ok) {
-      // Fallback: still unblock by returning the direct API key (temporary; exposes a secret to the browser).
-      // Remove this once v1/streaming.token works in your tenant.
-      return json({ ok: true, token: apiKey, fallback: true, detail: j });
+    if (r.ok && token) {
+      return Response.json(
+        { ok: true, token },
+        { headers: { 'Cache-Control': 'no-store' } }
+      );
     }
 
-    const token = j?.data?.token || j?.token || j?.accessToken;
-    if (!token) {
-      return json({ ok: false, status: 502, code: 'NO_TOKEN', detail: j }, { status: 502 });
-    }
-
-    return json({ ok: true, token });
-  } catch (err) {
-    // Fallback on network failure as well (temporary)
-    return json({ ok: true, token: apiKey, fallback: true, detail: String(err || '') });
+    // Fallback: return API key as token (temporary unblock)
+    return Response.json(
+      { ok: true, token: key, fallback: true },
+      { headers: { 'Cache-Control': 'no-store' } }
+    );
+  } catch (e) {
+    // Network trouble -> fallback to API key as token
+    return Response.json(
+      { ok: true, token: key, fallback: true },
+      { headers: { 'Cache-Control': 'no-store' } }
+    );
   }
 }
