@@ -16,7 +16,7 @@ const Icon = {
   Restart:(p) => (<svg width="18" height="18" viewBox="0 0 24 24" fill="none" {...p}><path d="M3 4v6h6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/><path d="M21 20a9 9 0 1 1-3-13.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/></svg>),
 };
 
-// Web Speech (dictation -> Retell)
+// web speech
 function makeRecognizer(onText) {
   const SR = typeof window !== 'undefined'
     ? (window.SpeechRecognition || window.webkitSpeechRecognition)
@@ -41,7 +41,7 @@ function PageInner() {
 
   const containerRef = useRef(null);
   const videoRef = useRef(null);
-  const canvasRef = useRef(null); // freeze-frame
+  const canvasRef = useRef(null);
   const avatarRef = useRef(null);
   const recRef = useRef(null);
   const reconnectRef = useRef({ timer: null, tries: 0 });
@@ -58,6 +58,7 @@ function PageInner() {
   const [isFullscreen, setIsFullscreen] = useState(false);
 
   const idFromEnv = (process.env.NEXT_PUBLIC_HEYGEN_AVATAR_ID || '').trim();
+  const voiceFromEnv = (process.env.NEXT_PUBLIC_HEYGEN_VOICE_ID || '').trim(); // optional
 
   const push = useCallback((role, text) => setMessages((p) => [...p, { role, text }]), []);
 
@@ -85,7 +86,7 @@ function PageInner() {
     return j.reply || '';
   }, []);
 
-  // ---------- Freeze frame ----------
+  // ---------- helpers: freeze-frame ----------
   const showFreeze = useCallback(() => {
     try {
       const v = videoRef.current, c = canvasRef.current;
@@ -113,7 +114,7 @@ function PageInner() {
       await v.play();
       setNeedGesture(false);
     } catch {
-      setNeedGesture(true); // autoplay blocked
+      setNeedGesture(true);
     }
   }, [soundOn]);
 
@@ -129,24 +130,32 @@ function PageInner() {
     setStatus('reconnecting');
   }, []); // begin below
 
-  // Try both shapes: avatarId OR avatarName (avoids 400 from schema mismatch)
-  async function createWithFallback(avatar, AvatarQuality, idString) {
-    // 1) try avatarId
-    try {
-      const payload = { avatarId: idString, quality: AvatarQuality?.High || 'high' };
-      console.log('[HeyGen] createStartAvatar TRY avatarId', payload);
-      await avatar.createStartAvatar(payload);
-      console.log('[HeyGen] createStartAvatar OK with avatarId');
-      return true;
-    } catch (e1) {
-      console.warn('[HeyGen] avatarId failed, will try avatarName', e1?.message || e1);
+  // Try permutations to avoid tenant schema mismatch (prevents 400s)
+  async function startWithPermutations(avatar, AvatarQuality, idString, voiceId) {
+    const attempts = [];
+
+    // helpers
+    const Q = { High: (AvatarQuality?.High || 'high'), Medium: (AvatarQuality?.Medium || 'medium') };
+    const base = voiceId ? { voice: { voiceId } } : {};
+
+    attempts.push({ avatarId: idString, quality: Q.High, ...base });
+    attempts.push({ avatarName: idString, quality: Q.High, ...base });
+    attempts.push({ avatarId: idString, quality: Q.Medium, ...base });
+    attempts.push({ avatarName: idString, quality: Q.Medium, ...base });
+
+    let lastErr;
+    for (const payload of attempts) {
+      try {
+        console.log('[HeyGen] createStartAvatar TRY', payload);
+        await avatar.createStartAvatar(payload);
+        console.log('[HeyGen] createStartAvatar OK with', payload);
+        return true;
+      } catch (e) {
+        lastErr = e;
+        console.warn('[HeyGen] createStartAvatar failed with', payload, e?.message || e);
+      }
     }
-    // 2) try avatarName
-    const payload2 = { avatarName: idString, quality: AvatarQuality?.High || 'high' };
-    console.log('[HeyGen] createStartAvatar TRY avatarName', payload2);
-    await avatar.createStartAvatar(payload2);
-    console.log('[HeyGen] createStartAvatar OK with avatarName');
-    return true;
+    throw lastErr || new Error('createStartAvatar failed (all permutations)');
   }
 
   const begin = useCallback(async (soft = false) => {
@@ -155,7 +164,6 @@ function PageInner() {
 
     if (!idFromEnv) { setStatus('error'); setError('MISSING_AVATAR_ID'); throw new Error('MISSING_AVATAR_ID'); }
 
-    // token
     const tr = await fetch('/api/heygen-token', { cache: 'no-store' });
     const tj = await tr.json().catch(() => ({}));
     const token = tj?.token || tj?.data?.token || tj?.accessToken || '';
@@ -165,7 +173,6 @@ function PageInner() {
     if (!sdk?.StreamingAvatar) throw new Error('SDK');
     const { StreamingAvatar, StreamingEvents, AvatarQuality } = sdk;
 
-    // stop any prior
     try { await avatarRef.current?.stopAvatar?.(); } catch {}
     avatarRef.current = null;
 
@@ -192,11 +199,11 @@ function PageInner() {
     });
 
     try {
-      await createWithFallback(avatar, AvatarQuality, idFromEnv);
+      await startWithPermutations(avatar, AvatarQuality, idFromEnv, voiceFromEnv || undefined);
     } catch (e) {
-      console.error('[HeyGen] createStartAvatar FAILED both shapes', e?.message || e);
+      console.error('[HeyGen] createStartAvatar FAILED (all)', e?.message || e);
       setStatus('error');
-      setError('Avatar start failed (400). Check ID format or tenant support.');
+      setError('Avatar start failed (400). Check ID string or tenant support.');
       throw e;
     }
 
@@ -206,9 +213,9 @@ function PageInner() {
       try { await avatarRef.current.speak({ text, taskType: 'REPEAT' }); } catch {}
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [idFromEnv, tryPlay, hideFreeze, showFreeze, scheduleReconnect]);
+  }, [idFromEnv, voiceFromEnv, tryPlay, hideFreeze, showFreeze, scheduleReconnect]);
 
-  // Dictation -> Retell -> speak
+  // dictation -> Retell -> speak
   const startRec = useCallback(() => {
     if (recRef.current) return;
     const rec = makeRecognizer(async (txt) => {
@@ -232,7 +239,7 @@ function PageInner() {
     recRef.current = null;
   }, []);
 
-  // Submit typed message
+  // typed submit
   const onSubmit = useCallback(async (e) => {
     e?.preventDefault?.();
     const text = (input || '').trim();
@@ -249,7 +256,7 @@ function PageInner() {
     }
   }, [input, ensureChat, send, push]);
 
-  // Autostart + auto mic
+  // autostart + auto mic
   useEffect(() => {
     let cancelled = false;
     (async () => {
