@@ -2,20 +2,37 @@
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-export async function GET() {
+function corsHeaders(origin) {
+  const allow = process.env.ALLOWED_ORIGINS || '*';
+  const allowOrigin =
+    allow === '*'
+      ? '*'
+      : (allow.split(',').map(s => s.trim()).includes(origin) ? origin : '');
+  return {
+    'Access-Control-Allow-Origin': allowOrigin || '*',
+    'Access-Control-Allow-Methods': 'GET,OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Max-Age': '86400',
+  };
+}
+
+export async function OPTIONS(req) {
+  return new Response(null, { status: 204, headers: corsHeaders(req.headers.get('origin') || '') });
+}
+
+export async function GET(req) {
+  const origin = req.headers.get('origin') || '';
+  const headers = { ...corsHeaders(origin), 'Cache-Control': 'no-store' };
+
   const apiKey = process.env.RETELL_API_KEY;
   const agentId = process.env.RETELL_CHAT_AGENT_ID;
 
   if (!apiKey || !agentId) {
-    return Response.json(
-      { ok: false, code: 'CONFIG', status: 500 },
-      { status: 500, headers: { 'Cache-Control': 'no-store' } },
-    );
+    return Response.json({ ok: false, status: 500, error: 'CONFIG' }, { headers });
   }
 
   try {
-    // Correct Retell endpoint for starting a chat
-    const r = await fetch('https://api.retellai.com/create-chat', {
+    const r = await fetch('https://api.retellai.com/v2/chat/start', {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${apiKey}`,
@@ -26,31 +43,17 @@ export async function GET() {
     });
 
     const j = await r.json().catch(() => ({}));
-
     if (!r.ok) {
-      return Response.json(
-        { ok: false, code: 'RETELL_START_FAILED', status: r.status, detail: j },
-        { status: r.status, headers: { 'Cache-Control': 'no-store' } },
-      );
+      return Response.json({ ok: false, status: r.status, error: j }, { headers });
     }
 
-    const chatId = j?.chat_id;
+    const chatId = j?.chat_id || j?.id;
     if (!chatId) {
-      return Response.json(
-        { ok: false, code: 'NO_CHAT_ID', status: 502, detail: j },
-        { status: 502, headers: { 'Cache-Control': 'no-store' } },
-      );
+      return Response.json({ ok: false, status: 502, error: 'NO_CHAT_ID' }, { headers });
     }
 
-    return Response.json(
-      { ok: true, chatId },
-      { headers: { 'Cache-Control': 'no-store' } },
-    );
-  } catch (err) {
-    return Response.json(
-      { ok: false, code: 'NETWORK', status: 500, detail: String(err?.message || err) },
-      { status: 500, headers: { 'Cache-Control': 'no-store' } },
-    );
+    return Response.json({ ok: true, chatId }, { headers });
+  } catch {
+    return Response.json({ ok: false, status: 500, error: 'NETWORK' }, { headers });
   }
 }
-
