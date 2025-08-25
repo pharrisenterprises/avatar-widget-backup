@@ -16,33 +16,33 @@ const LS_CHAT_KEY = 'retell_chat_id';
 
 // Simple SVG icons (inline)
 const Icon = {
-  MicOn:   (props) => (
+  MicOn: (props) => (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" {...props}>
       <path d="M12 15a4 4 0 0 0 4-4V7a4 4 0 1 0-8 0v4a4 4 0 0 0 4 4Z" stroke="currentColor" strokeWidth="2"/>
       <path d="M19 11a7 7 0 0 1-14 0M12 18v4" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
     </svg>
   ),
-  MicOff:  (props) => (
+  MicOff: (props) => (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" {...props}>
       <path d="M1.5 1.5l21 21" stroke="currentColor" strokeWidth="2"/>
       <path d="M12 15a4 4 0 0 0 4-4V7a4 4 0 0 0-6.8-2.8" stroke="currentColor" strokeWidth="2"/>
       <path d="M5 11a7 7 0 0 0 11.5 5.3M12 18v4" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
     </svg>
   ),
-  Volume:  (props) => (
+  Volume: (props) => (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" {...props}>
       <path d="M11 5 6 9H3v6h3l5 4V5Z" stroke="currentColor" strokeWidth="2" strokeLinejoin="round"/>
       <path d="M15 9a4 4 0 0 1 0 6M18 7a7 7 0 0 1 0 10" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
     </svg>
   ),
-  Mute:    (props) => (
+  Mute: (props) => (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" {...props}>
       <path d="M1.5 1.5l21 21" stroke="currentColor" strokeWidth="2"/>
       <path d="M11 5 6 9H3v6h3l5 4V5Z" stroke="currentColor" strokeWidth="2" strokeLinejoin="round"/>
       <path d="M18 7a7 7 0 0 1 2 5 7 7 0 0 1-1.3 4" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
     </svg>
   ),
-  Full:    (props) => (
+  Full: (props) => (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" {...props}>
       <path d="M8 3H3v5M16 3h5v5M3 16v5h5M16 21h5v-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
     </svg>
@@ -82,21 +82,24 @@ function PageInner() {
 
   const containerRef = useRef(null);
   const videoRef = useRef(null);
+  const canvasRef = useRef(null); // freeze-frame canvas
   const avatarRef = useRef(null);
-  const recRef = useRef(null); // SpeechRecognition
+  const recRef = useRef(null);
 
-  const [status, setStatus] = useState('idle'); // idle | connecting | ready | error
+  const reconnectRef = useRef({ timer: null, tries: 0 });
+
+  const [status, setStatus] = useState('idle'); // idle | connecting | ready | error | reconnecting
   const [error, setError] = useState('');
   const [chatId, setChatId] = useState('');
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
 
   const [soundOn, setSoundOn] = useState(true);
-  const [micOn, setMicOn] = useState(true);
+  const [micOn,   setMicOn]   = useState(true);
   const [needGesture, setNeedGesture] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
-  const avatarName = process.env.NEXT_PUBLIC_HEYGEN_AVATAR_ID || '';
+  const avatarNameEnv = process.env.NEXT_PUBLIC_HEYGEN_AVATAR_ID || '';
 
   const push = useCallback((role, text) => {
     setMessages((p) => [...p, { role, text }]);
@@ -107,16 +110,11 @@ function PageInner() {
     if (chatId) return chatId;
     try {
       const s = window.localStorage.getItem(LS_CHAT_KEY);
-      if (s) {
-        setChatId(s);
-        return s;
-      }
+      if (s) { setChatId(s); return s; }
     } catch {}
     const r = await fetch('/api/retell-chat/start', { cache: 'no-store' });
     const j = await r.json().catch(() => ({}));
-    if (!r.ok || !j?.ok || !j?.chatId) {
-      throw new Error('CHAT_START_FAILED');
-    }
+    if (!r.ok || !j?.ok || !j?.chatId) throw new Error('CHAT_START_FAILED');
     setChatId(j.chatId);
     try { window.localStorage.setItem(LS_CHAT_KEY, j.chatId); } catch {}
     return j.chatId;
@@ -138,21 +136,42 @@ function PageInner() {
     return j.reply || '';
   }, []);
 
+  // ------- Freeze-frame helpers -------
+  const showFreeze = useCallback(() => {
+    try {
+      const v = videoRef.current;
+      const c = canvasRef.current;
+      if (!v || !c) return;
+      const w = v.videoWidth || v.clientWidth || 480;
+      const h = v.videoHeight || v.clientHeight || 270;
+      c.width = w;
+      c.height = h;
+      const ctx = c.getContext('2d');
+      if (ctx) {
+        ctx.drawImage(v, 0, 0, w, h);
+      }
+      c.style.opacity = '1';
+    } catch {}
+  }, []);
+
+  const hideFreeze = useCallback(() => {
+    const c = canvasRef.current;
+    if (c) c.style.opacity = '0';
+  }, []);
+
   // ------- HeyGen helpers -------
   const stopAvatar = useCallback(async () => {
-    try {
-      const a = avatarRef.current;
-      if (a?.stopAvatar) await a.stopAvatar();
-    } catch {}
+    try { await avatarRef.current?.stopAvatar?.(); } catch {}
     avatarRef.current = null;
     if (videoRef.current) videoRef.current.srcObject = null;
   }, []);
 
   const tryPlay = useCallback(async () => {
     try {
-      if (!videoRef.current) return;
-      if (soundOn) videoRef.current.muted = false;
-      await videoRef.current.play();
+      const v = videoRef.current;
+      if (!v) return;
+      v.muted = !soundOn; // reflect current toggle
+      await v.play();
       setNeedGesture(false);
     } catch {
       // Autoplay blocked — show “tap to enable” shim
@@ -160,9 +179,25 @@ function PageInner() {
     }
   }, [soundOn]);
 
-  const begin = useCallback(async () => {
-    setStatus('connecting');
+  const scheduleReconnect = useCallback(() => {
+    const s = reconnectRef.current;
+    if (s.timer) return; // already scheduled
+    const delay = Math.min(4000, 800 * Math.pow(2, s.tries || 0)); // 0.8s, 1.6s, 3.2s, 4s…
+    s.timer = setTimeout(async () => {
+      s.timer = null;
+      s.tries = (s.tries || 0) + 1;
+      try {
+        await begin(true);
+      } catch {
+        scheduleReconnect();
+      }
+    }, delay);
+    setStatus('reconnecting');
+  }, []); // begin added later (function hoisted with useCallback deps trick)
+
+  const begin = useCallback(async (soft = false) => {
     setError('');
+    setStatus(soft ? 'reconnecting' : 'connecting');
 
     // token
     const tr = await fetch('/api/heygen-token', { cache: 'no-store' });
@@ -172,48 +207,80 @@ function PageInner() {
 
     const sdk = await loadHeygenSdk();
     if (!sdk?.StreamingAvatar) throw new Error('SDK');
-
     const { StreamingAvatar, StreamingEvents, AvatarQuality, TaskType } = sdk;
+
+    // stop any previous without wiping freeze-frame just yet
+    try { await avatarRef.current?.stopAvatar?.(); } catch {}
+    avatarRef.current = null;
+
     const avatar = new StreamingAvatar({ token, debug: false });
     avatarRef.current = avatar;
 
     avatar.on(StreamingEvents.STREAM_READY, (evt) => {
       const stream = evt?.detail;
-      if (videoRef.current && stream instanceof MediaStream) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.playsInline = true;
-        // try to unmute (play) immediately
+      const v = videoRef.current;
+      if (v && stream instanceof MediaStream) {
+        v.srcObject = stream;
+        v.playsInline = true;
+        hideFreeze();
         tryPlay();
         setStatus('ready');
+        // reset backoff
+        if (reconnectRef.current.timer) {
+          clearTimeout(reconnectRef.current.timer);
+          reconnectRef.current.timer = null;
+        }
+        reconnectRef.current.tries = 0;
       }
     });
 
     avatar.on(StreamingEvents.STREAM_DISCONNECTED, () => {
-      if (videoRef.current) videoRef.current.srcObject = null;
-      setStatus('idle');
+      showFreeze();      // keep last frame instead of black
+      scheduleReconnect();
     });
 
-    await avatar.createStartAvatar({
-      avatarName,
-      quality: AvatarQuality?.High || 'high',
-      welcomeMessage: '',
-    });
+    const quality = AvatarQuality?.High || 'high';
+    const name = (avatarNameEnv || '').trim();
 
-    // helper to speak
+    // Try both shapes: avatarName first, then avatarId
+    let started = false;
+    let lastErr;
+
+    async function tryStart(payload) {
+      try {
+        await avatar.createStartAvatar(payload);
+        started = true;
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+
+    if (name) {
+      await tryStart({ avatarName: name, quality, welcomeMessage: '' });
+      if (!started) await tryStart({ avatarId: name, quality, welcomeMessage: '' });
+    } else {
+      lastErr = new Error('MISSING_AVATAR_ID');
+    }
+
+    if (!started) {
+      setStatus('error');
+      setError(`Avatar start failed: ${(lastErr && (lastErr.message || lastErr.toString())) || 'UNKNOWN'}`);
+      throw lastErr || new Error('START_FAILED');
+    }
+
+    // speak helper identical to your prior code
     async function speak(text) {
       if (!text) return;
-      const payload = TaskType
-        ? { text, taskType: TaskType.REPEAT }
-        : { text, taskType: 'REPEAT' };
+      const payload = TaskType ? { text, taskType: TaskType.REPEAT } : { text, taskType: 'REPEAT' };
       try { await avatar.speak(payload); } catch {}
     }
-    // store on window for quick manual tests
     window.__avatarSpeak = speak;
-  }, [avatarName, tryPlay]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [avatarNameEnv, tryPlay, hideFreeze, showFreeze, scheduleReconnect]);
 
   // Speech recognition
   const startRec = useCallback(() => {
-    if (recRef.current) return; // already running
+    if (recRef.current) return;
     const rec = makeRecognizer(async (txt) => {
       push('user', txt);
       try {
@@ -225,7 +292,7 @@ function PageInner() {
         push('system', `Message failed${err?.status ? ` (${err.status})` : ''}. Please try again.`);
       }
     });
-    if (!rec) return; // not supported
+    if (!rec) return; // unsupported
     recRef.current = rec;
     try { rec.start(); } catch {}
   }, [ensureChat, send, push]);
@@ -272,7 +339,15 @@ function PageInner() {
         }
       }
     })();
-    return () => { cancelled = true; stopRec(); stopAvatar(); };
+    return () => {
+      cancelled = true;
+      if (reconnectRef.current.timer) {
+        clearTimeout(reconnectRef.current.timer);
+        reconnectRef.current.timer = null;
+      }
+      stopRec();
+      stopAvatar();
+    };
   }, [autostart, begin, ensureChat, stopAvatar, micOn, startRec]);
 
   // auto-scroll chat
@@ -284,12 +359,13 @@ function PageInner() {
   // ------- UI handlers -------
   const onToggleSound = useCallback(async () => {
     setSoundOn((s) => !s);
-    if (videoRef.current) {
-      videoRef.current.muted = soundOn; // toggle
-      try { await videoRef.current.play(); } catch {}
+    const v = videoRef.current;
+    if (v) {
+      v.muted = v.muted ? false : true; // flip
+      try { await v.play(); } catch {}
     }
     setNeedGesture(false);
-  }, [soundOn]);
+  }, []);
 
   const onToggleMic = useCallback(() => {
     setMicOn((m) => !m);
@@ -322,9 +398,10 @@ function PageInner() {
 
   const onGestureEnable = useCallback(async () => {
     setNeedGesture(false);
-    if (!videoRef.current) return;
-    videoRef.current.muted = false;
-    try { await videoRef.current.play(); } catch {}
+    const v = videoRef.current;
+    if (!v) return;
+    v.muted = false;
+    try { await v.play(); } catch {}
   }, []);
 
   // ------- Layout classes -------
@@ -350,10 +427,24 @@ function PageInner() {
         background: '#0f1220',
         color: '#e9ecf1',
         borderRadius: 12,
+        position: 'relative',
       }}
     >
       {/* Video with controls overlay */}
       <div style={{ position: 'relative', borderRadius: 12, overflow: 'hidden', background: '#000' }}>
+        {/* Freeze-frame canvas sits behind <video>; we toggle its opacity */}
+        <canvas
+          ref={canvasRef}
+          style={{
+            position: 'absolute',
+            inset: 0,
+            width: '100%',
+            height: '100%',
+            objectFit: 'cover',
+            opacity: 0,
+            transition: 'opacity .2s ease',
+          }}
+        />
         <video
           ref={videoRef}
           playsInline
@@ -363,12 +454,21 @@ function PageInner() {
         />
 
         {/* Status veil */}
-        {status !== 'ready' && (
+        {status !== 'ready' && status !== 'reconnecting' && (
           <div style={{
             position: 'absolute', inset: 0, display: 'grid', placeItems: 'center',
             color: '#fff', background: 'rgba(0,0,0,.35)', fontWeight: 700
           }}>
             {status === 'idle' ? 'Idle' : status === 'connecting' ? 'Connecting…' : 'Error'}
+          </div>
+        )}
+
+        {status === 'reconnecting' && (
+          <div style={{
+            position: 'absolute', inset: 0, display: 'grid', placeItems: 'center',
+            color: '#fff', background: 'rgba(0,0,0,.25)', fontWeight: 700
+          }}>
+            Reconnecting…
           </div>
         )}
 
@@ -487,4 +587,3 @@ export default function EmbedPage() {
     </Suspense>
   );
 }
-
