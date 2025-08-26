@@ -1,42 +1,46 @@
 // app/api/heygen-token/route.js
 export const dynamic = 'force-dynamic';
-export const revalidate = 0;
 
 export async function GET() {
-  const apiKey = process.env.HEYGEN_API_KEY;
-  if (!apiKey) {
-    return Response.json(
-      { ok: false, status: 500, error: 'MISSING_HEYGEN_API_KEY' },
-      { headers: { 'Cache-Control': 'no-store' } },
-    );
-  }
-
-  // Try short-lived streaming token first (not all tenants support this)
   try {
-    const r = await fetch('https://api.heygen.com/v1/streaming.token', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      cache: 'no-store',
-      body: JSON.stringify({ ttl: 3600 }),
-    });
-    const j = await r.json().catch(() => ({}));
-    const token = j?.token || j?.data?.token || (typeof j === 'string' ? j : '');
-    if (r.ok && token) {
+    const apiKey = process.env.HEYGEN_API_KEY || '';
+    if (!apiKey) {
       return Response.json(
-        { ok: true, token, fallback: false },
-        { headers: { 'Cache-Control': 'no-store' } },
+        { ok: false, error: 'Missing HEYGEN_API_KEY' },
+        { status: 500 }
       );
     }
-  } catch {
-    // ignore and fall through to fallback
-  }
 
-  // Fallback: return API key (SDK accepts it)
-  return Response.json(
-    { ok: true, token: apiKey, fallback: true },
-    { headers: { 'Cache-Control': 'no-store' } },
-  );
+    // 1) Try to mint a short-lived streaming token
+    try {
+      const r = await fetch('https://api.heygen.com/v1/streaming.create_token', {
+        method: 'POST',
+        headers: {
+          'X-Api-Key': apiKey,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({}),
+        cache: 'no-store',
+      });
+
+      const j = await r.json().catch(() => ({}));
+      const token = j?.data?.token || j?.token || null;
+
+      if (r.ok && token) {
+        return Response.json({ ok: true, token, method: 'create_token' });
+      } else {
+        // fall through to #2
+      }
+    } catch {
+      // fall through to #2
+    }
+
+    // 2) Fallback — return API key as token (temporary unblock)
+    return Response.json({ ok: true, token: apiKey, method: 'api_key_fallback' });
+  } catch (e) {
+    return Response.json(
+      { ok: false, error: e?.message || 'token failed' },
+      { status: 500 }
+    );
+  }
 }
