@@ -1,59 +1,61 @@
 // app/api/retell-chat/start/route.js
+export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
-export const revalidate = 0;
 
-function corsHeaders(origin) {
-  const allow = process.env.ALLOWED_ORIGINS || '*';
-  const allowOrigin =
-    allow === '*'
-      ? '*'
-      : (allow.split(',').map(s => s.trim()).includes(origin) ? origin : '');
-  return {
-    'Access-Control-Allow-Origin': allowOrigin || '*',
-    'Access-Control-Allow-Methods': 'GET,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-    'Access-Control-Max-Age': '86400',
-  };
-}
-
-export async function OPTIONS(req) {
-  return new Response(null, { status: 204, headers: corsHeaders(req.headers.get('origin') || '') });
-}
-
-export async function GET(req) {
-  const origin = req.headers.get('origin') || '';
-  const headers = { ...corsHeaders(origin), 'Cache-Control': 'no-store' };
-
-  const apiKey = process.env.RETELL_API_KEY;
-  const agentId = process.env.RETELL_CHAT_AGENT_ID;
-
-  if (!apiKey || !agentId) {
-    return Response.json({ ok: false, status: 500, error: 'CONFIG' }, { headers });
-  }
-
+export async function GET() {
   try {
-    const r = await fetch('https://api.retellai.com/v2/chat/start', {
+    const apiKey =
+      process.env.RETELL_API_KEY ||
+      process.env.NEXT_PUBLIC_RETELL_API_KEY ||
+      '';
+    const agentId =
+      process.env.RETELL_CHAT_AGENT_ID ||
+      process.env.RETELL_AGENT_ID ||
+      process.env.NEXT_PUBLIC_RETELL_AGENT_ID ||
+      '';
+
+    if (!apiKey || !agentId) {
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          error: 'Missing RETELL_API_KEY or RETELL_CHAT_AGENT_ID',
+        }),
+        { status: 500, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Correct chat start endpoint
+    const r = await fetch('https://api.retellai.com/create-chat', {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
       },
-      cache: 'no-store',
       body: JSON.stringify({ agent_id: agentId }),
+      cache: 'no-store',
     });
 
-    const j = await r.json().catch(() => ({}));
+    const text = await r.text();
+    let j = {};
+    try { j = text ? JSON.parse(text) : {}; } catch {}
+
     if (!r.ok) {
-      return Response.json({ ok: false, status: r.status, error: j }, { headers });
+      return new Response(
+        JSON.stringify({ ok: false, status: r.status, body: j }),
+        { status: r.status, headers: { 'Content-Type': 'application/json' } }
+      );
     }
 
-    const chatId = j?.chat_id || j?.id;
-    if (!chatId) {
-      return Response.json({ ok: false, status: 502, error: 'NO_CHAT_ID' }, { headers });
-    }
+    const chatId = j?.chat_id || j?.id || j?.data?.chat_id || j?.data?.id || null;
 
-    return Response.json({ ok: true, chatId }, { headers });
-  } catch {
-    return Response.json({ ok: false, status: 500, error: 'NETWORK' }, { headers });
+    return new Response(
+      JSON.stringify({ ok: true, chatId, raw: j }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } }
+    );
+  } catch (e) {
+    return new Response(
+      JSON.stringify({ ok: false, error: e?.message || 'start failed' }),
+      { status: 500, headers: { 'Content-Type': 'application/json' } }
+    );
   }
 }
