@@ -7,8 +7,7 @@ import { loadHeygenSdk } from '../lib/loadHeygenSdk';
 
 const PANEL_W = 360;
 const PANEL_H = 420;
-// Was 30_000; make it 5 minutes so it doesn't “go idle” so fast.
-const IDLE_MS = 300_000;
+const IDLE_MS = 300_000; // 5 minutes (was 30s)
 const LS_CHAT_KEY = 'retell_chat_id';
 
 function EmbedPageInner() {
@@ -28,7 +27,7 @@ function EmbedPageInner() {
 
   const idleTimerRef = useRef(null);
 
-  const avatarId = useMemo(() => process.env.NEXT_PUBLIC_HEYGEN_AVATAR_ID || '', []);
+  const avatarEnv = useMemo(() => process.env.NEXT_PUBLIC_HEYGEN_AVATAR_ID || process.env.HEYGEN_AVATAR_ID || '', []);
 
   const log = useCallback((...args) => {
     const line = args.map(a => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
@@ -67,7 +66,6 @@ function EmbedPageInner() {
   const ensureRetellChat = useCallback(async () => {
     if (retellChatId) return retellChatId;
 
-    // attempt resume from localStorage
     const stored = (typeof window !== 'undefined') ? window.localStorage.getItem(LS_CHAT_KEY) : '';
     if (stored) {
       setRetellChatId(stored);
@@ -112,9 +110,9 @@ function EmbedPageInner() {
     const tokenResp = await fetch('/api/heygen-token', { method: 'GET', cache: 'no-store' });
     const tokenJson = await tokenResp.json().catch(() => ({}));
     log('HeyGen token response:', tokenJson);
-    const token = tokenJson?.token || tokenJson?.data?.token || tokenJson?.accessToken || '';
-    if (!token) {
-      throw new Error('Missing HeyGen token from /api/heygen-token');
+    const token = tokenJson?.token || '';
+    if (!tokenJson?.ok || !token) {
+      throw new Error(`Missing/invalid HeyGen token (${tokenJson?.error || 'unknown'})`);
     }
 
     log('HeyGen: loading SDK…');
@@ -132,7 +130,6 @@ function EmbedPageInner() {
       if (videoRef.current && mediaStream instanceof MediaStream) {
         videoRef.current.srcObject = mediaStream;
         videoRef.current.playsInline = true;
-        // Try to unmute immediately; if blocked, user can click Unmute.
         try {
           videoRef.current.muted = false;
           videoRef.current.play().catch((e) => log('Video play() blocked (autoplay policy):', e?.message || e));
@@ -148,25 +145,42 @@ function EmbedPageInner() {
       setStatus('idle');
     });
 
-    log('HeyGen: createStartAvatar()…', { avatarId });
+    // Try avatarName first, then retry once with avatarId if it 400s.
+    const optsName = {
+      avatarName: avatarEnv,
+      quality: AvatarQuality?.High || 'high',
+      welcomeMessage: '',
+    };
+    const optsId = {
+      avatarId: avatarEnv,
+      quality: AvatarQuality?.High || 'high',
+      welcomeMessage: '',
+    };
+
+    log('HeyGen: createStartAvatar()…', { try: 'avatarName', value: avatarEnv });
     try {
-      const sessionData = await avatar.createStartAvatar({
-        avatarName: avatarId,              // you keep using the public name
-        quality: AvatarQuality?.High || 'high',
-        welcomeMessage: ''
-      });
-      log('HeyGen: session started:', sessionData);
+      const sessionData = await avatar.createStartAvatar(optsName);
+      log('HeyGen: session started (name):', sessionData);
       setStatus('ready');
       markActivity();
-    } catch (e) {
-      // Surface a useful message if token was rejected (the 400 you’ve seen)
-      const msg = (e && e.message) ? e.message : 'createStartAvatar failed';
-      log('HeyGen createStartAvatar error:', msg);
-      setError(`HeyGen error: ${msg}`);
-      setStatus('error');
-      // leave video overlay up instead of blanking
+      return;
+    } catch (e1) {
+      log('HeyGen createStartAvatar(name) error:', e1?.message || e1);
+      log('HeyGen: retry createStartAvatar() with avatarId…', { try: 'avatarId', value: avatarEnv });
+      try {
+        const sessionData = await avatar.createStartAvatar(optsId);
+        log('HeyGen: session started (id):', sessionData);
+        setStatus('ready');
+        markActivity();
+        return;
+      } catch (e2) {
+        const msg = (e2 && e2.message) ? e2.message : 'createStartAvatar failed';
+        log('HeyGen createStartAvatar(id) error:', msg);
+        setError(`HeyGen error: ${msg}`);
+        setStatus('error');
+      }
     }
-  }, [avatarId, log, markActivity]);
+  }, [avatarEnv, log, markActivity]);
 
   // Speak Retell reply EXACTLY (REPEAT mode)
   const speak = useCallback(async (text) => {
@@ -186,7 +200,6 @@ function EmbedPageInner() {
     }
   }, [log, markActivity]);
 
-  // Unmute video (user gesture)
   const unmuteAudio = useCallback(async () => {
     try {
       if (videoRef.current) {
@@ -199,7 +212,6 @@ function EmbedPageInner() {
     }
   }, [log]);
 
-  // Submit handler (text chat)
   const onSubmit = useCallback(async (e) => {
     e?.preventDefault?.();
     const text = input.trim();
@@ -214,7 +226,7 @@ function EmbedPageInner() {
       const reply = await sendToRetell(chatId, text);
       const safeReply = (reply || '').toString();
       pushMessage('assistant', safeReply);
-      await speak(safeReply); // REPEAT mode makes audio == captions
+      await speak(safeReply);
     } catch (err) {
       const msg = err?.message || 'Send failed';
       setError(msg);
@@ -224,12 +236,10 @@ function EmbedPageInner() {
     }
   }, [input, ensureRetellChat, sendToRetell, pushMessage, speak, markActivity, log]);
 
-  // Autostart if requested + try to resume chatId from LS
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        // restore chat id if present
         try {
           const stored = window.localStorage.getItem(LS_CHAT_KEY);
           if (stored) setRetellChatId(stored);
@@ -280,7 +290,6 @@ function EmbedPageInner() {
     }
   }, [initHeygen, ensureRetellChat, log]);
 
-  // Clean up timer
   useEffect(() => () => clearIdle(), [clearIdle]);
 
   return (
@@ -398,7 +407,7 @@ function EmbedPageInner() {
             wordBreak: 'break-word',
           }}
         >
-          <div><strong>Avatar ID</strong>: {avatarId || 'N/A'}</div>
+          <div><strong>Avatar env</strong>: {avatarEnv || 'N/A'}</div>
           <div><strong>Retell Chat ID</strong>: {retellChatId || 'N/A'}</div>
           <div><strong>Status</strong>: {status}</div>
         </div>
