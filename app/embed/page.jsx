@@ -1,4 +1,3 @@
-// app/embed/page.jsx
 'use client';
 
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -7,7 +6,7 @@ import { loadHeygenSdk } from '../lib/loadHeygenSdk';
 
 const PANEL_W = 360;
 const PANEL_H = 420;
-const IDLE_MS = 300_000; // 5 minutes (was 30s)
+const IDLE_MS = 30_000; // keep your original; raise later if you want
 const LS_CHAT_KEY = 'retell_chat_id';
 
 function EmbedPageInner() {
@@ -27,7 +26,7 @@ function EmbedPageInner() {
 
   const idleTimerRef = useRef(null);
 
-  const avatarEnv = useMemo(() => process.env.NEXT_PUBLIC_HEYGEN_AVATAR_ID || process.env.HEYGEN_AVATAR_ID || '', []);
+  const avatarId = useMemo(() => process.env.NEXT_PUBLIC_HEYGEN_AVATAR_ID || '', []);
 
   const log = useCallback((...args) => {
     const line = args.map(a => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
@@ -52,7 +51,7 @@ function EmbedPageInner() {
     clearIdle();
     idleTimerRef.current = setTimeout(async () => {
       log('Idle timeout: pausing session to save cost.');
-      pushMessage('system', 'Session paused after inactivity. Click Start to continue.');
+      pushMessage('system', 'Session paused after 30 seconds of inactivity. Click Start to continue.');
       await stopAll();
     }, IDLE_MS);
   }, [clearIdle, log, pushMessage]);
@@ -110,9 +109,9 @@ function EmbedPageInner() {
     const tokenResp = await fetch('/api/heygen-token', { method: 'GET', cache: 'no-store' });
     const tokenJson = await tokenResp.json().catch(() => ({}));
     log('HeyGen token response:', tokenJson);
-    const token = tokenJson?.token || '';
-    if (!tokenJson?.ok || !token) {
-      throw new Error(`Missing/invalid HeyGen token (${tokenJson?.error || 'unknown'})`);
+    const token = tokenJson?.token || tokenJson?.data?.token || tokenJson?.accessToken || '';
+    if (!token) {
+      throw new Error('Missing HeyGen token from /api/heygen-token');
     }
 
     log('HeyGen: loading SDK…');
@@ -121,21 +120,29 @@ function EmbedPageInner() {
     const { StreamingAvatar, AvatarQuality, StreamingEvents } = sdk;
     if (!StreamingAvatar) throw new Error('StreamingAvatar class not found in SDK.');
 
+    // Turn on debug for visibility while we chase the 400
     const avatar = new StreamingAvatar({ token, debug: true });
     avatarRef.current = avatar;
+
+    // If the SDK exposes any error event, wire it (some builds do)
+    try {
+      const errEvt = StreamingEvents.ERROR || StreamingEvents.AVATAR_ERROR || 'error';
+      avatar.on(errEvt, (e) => {
+        log('HeyGen: ERROR event', e?.detail || e);
+        setError('Avatar error');
+        setStatus('error');
+      });
+    } catch {}
 
     avatar.on(StreamingEvents.STREAM_READY, (evt) => {
       log('HeyGen: STREAM_READY.');
       const mediaStream = evt?.detail;
       if (videoRef.current && mediaStream instanceof MediaStream) {
         videoRef.current.srcObject = mediaStream;
-        videoRef.current.playsInline = true;
-        try {
-          videoRef.current.muted = false;
-          videoRef.current.play().catch((e) => log('Video play() blocked (autoplay policy):', e?.message || e));
-        } catch (e) {
-          log('Video unmute/play error:', e?.message || e);
-        }
+        videoRef.current.muted = true; // allow autoplay
+        videoRef.current.onloadedmetadata = () => {
+          videoRef.current.play().catch((e) => log('Video play() error:', e?.message || e));
+        };
       }
     });
 
@@ -145,42 +152,26 @@ function EmbedPageInner() {
       setStatus('idle');
     });
 
-    // Try avatarName first, then retry once with avatarId if it 400s.
-    const optsName = {
-      avatarName: avatarEnv,
-      quality: AvatarQuality?.High || 'high',
-      welcomeMessage: '',
-    };
-    const optsId = {
-      avatarId: avatarEnv,
-      quality: AvatarQuality?.High || 'high',
-      welcomeMessage: '',
-    };
-
-    log('HeyGen: createStartAvatar()…', { try: 'avatarName', value: avatarEnv });
+    // Start session
+    log('HeyGen: createStartAvatar()…', { avatarId });
     try {
-      const sessionData = await avatar.createStartAvatar(optsName);
-      log('HeyGen: session started (name):', sessionData);
+      const sessionData = await avatar.createStartAvatar({
+        // Your env is a *name* ("Dexter_Lawyer_Sitting_public"), which worked for you before.
+        // If you ever switch to UUIDs, change this to avatarId: 'uuid-here'
+        avatarName: avatarId,
+        quality: AvatarQuality?.High || 'high',
+        welcomeMessage: ''
+      });
+      log('HeyGen: session started:', sessionData);
       setStatus('ready');
       markActivity();
-      return;
-    } catch (e1) {
-      log('HeyGen createStartAvatar(name) error:', e1?.message || e1);
-      log('HeyGen: retry createStartAvatar() with avatarId…', { try: 'avatarId', value: avatarEnv });
-      try {
-        const sessionData = await avatar.createStartAvatar(optsId);
-        log('HeyGen: session started (id):', sessionData);
-        setStatus('ready');
-        markActivity();
-        return;
-      } catch (e2) {
-        const msg = (e2 && e2.message) ? e2.message : 'createStartAvatar failed';
-        log('HeyGen createStartAvatar(id) error:', msg);
-        setError(`HeyGen error: ${msg}`);
-        setStatus('error');
-      }
+    } catch (e) {
+      log('HeyGen createStartAvatar() failed:', e?.message || e);
+      setError('API request failed (start). See console for details.');
+      setStatus('error');
+      throw e;
     }
-  }, [avatarEnv, log, markActivity]);
+  }, [avatarId, log, markActivity]);
 
   // Speak Retell reply EXACTLY (REPEAT mode)
   const speak = useCallback(async (text) => {
@@ -200,6 +191,7 @@ function EmbedPageInner() {
     }
   }, [log, markActivity]);
 
+  // Unmute video (user gesture)
   const unmuteAudio = useCallback(async () => {
     try {
       if (videoRef.current) {
@@ -212,6 +204,7 @@ function EmbedPageInner() {
     }
   }, [log]);
 
+  // Submit handler (text chat)
   const onSubmit = useCallback(async (e) => {
     e?.preventDefault?.();
     const text = input.trim();
@@ -226,7 +219,7 @@ function EmbedPageInner() {
       const reply = await sendToRetell(chatId, text);
       const safeReply = (reply || '').toString();
       pushMessage('assistant', safeReply);
-      await speak(safeReply);
+      await speak(safeReply); // REPEAT mode makes audio == captions
     } catch (err) {
       const msg = err?.message || 'Send failed';
       setError(msg);
@@ -236,6 +229,7 @@ function EmbedPageInner() {
     }
   }, [input, ensureRetellChat, sendToRetell, pushMessage, speak, markActivity, log]);
 
+  // Autostart if requested + try to resume chatId from LS
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -290,6 +284,7 @@ function EmbedPageInner() {
     }
   }, [initHeygen, ensureRetellChat, log]);
 
+  // Clean up timer
   useEffect(() => () => clearIdle(), [clearIdle]);
 
   return (
@@ -407,7 +402,7 @@ function EmbedPageInner() {
             wordBreak: 'break-word',
           }}
         >
-          <div><strong>Avatar env</strong>: {avatarEnv || 'N/A'}</div>
+          <div><strong>Avatar ID</strong>: {avatarId || 'N/A'}</div>
           <div><strong>Retell Chat ID</strong>: {retellChatId || 'N/A'}</div>
           <div><strong>Status</strong>: {status}</div>
         </div>
