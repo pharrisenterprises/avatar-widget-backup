@@ -1,7 +1,6 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  // No headers/CSP/X-Frame-Options — nothing added here.
-  reactStrictMode: true,
+  // Nothing special — no CSP, no frame-ancestors
 };
 
 export default nextConfig;
