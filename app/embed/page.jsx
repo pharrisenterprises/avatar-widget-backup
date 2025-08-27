@@ -1,3 +1,4 @@
+// app/embed/page.jsx
 'use client';
 
 import React, {
@@ -11,445 +12,479 @@ import React, {
 import { useSearchParams } from 'next/navigation';
 import { loadHeygenSdk } from '../lib/loadHeygenSdk';
 
-const PANEL_W = 360;
-const PANEL_H = 420;
 const LS_CHAT_KEY = 'retell_chat_id';
 
-function EmbedPageInner() {
-  const searchParams = useSearchParams();
-  const autostart = useMemo(() => searchParams?.get('autostart') === '1', [searchParams]);
+// Simple SVG icons (inline)
+const Icon = {
+  MicOn:   (props) => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" {...props}>
+      <path d="M12 15a4 4 0 0 0 4-4V7a4 4 0 1 0-8 0v4a4 4 0 0 0 4 4Z" stroke="currentColor" strokeWidth="2"/>
+      <path d="M19 11a7 7 0 0 1-14 0M12 18v4" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+    </svg>
+  ),
+  MicOff:  (props) => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" {...props}>
+      <path d="M1.5 1.5l21 21" stroke="currentColor" strokeWidth="2"/>
+      <path d="M12 15a4 4 0 0 0 4-4V7a4 4 0 0 0-6.8-2.8" stroke="currentColor" strokeWidth="2"/>
+      <path d="M5 11a7 7 0 0 0 11.5 5.3M12 18v4" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+    </svg>
+  ),
+  Volume:  (props) => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" {...props}>
+      <path d="M11 5 6 9H3v6h3l5 4V5Z" stroke="currentColor" strokeWidth="2" strokeLinejoin="round"/>
+      <path d="M15 9a4 4 0 0 1 0 6M18 7a7 7 0 0 1 0 10" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+    </svg>
+  ),
+  Mute:    (props) => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" {...props}>
+      <path d="M1.5 1.5l21 21" stroke="currentColor" strokeWidth="2"/>
+      <path d="M11 5 6 9H3v6h3l5 4V5Z" stroke="currentColor" strokeWidth="2" strokeLinejoin="round"/>
+      <path d="M18 7a7 7 0 0 1 2 5 7 7 0 0 1-1.3 4" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+    </svg>
+  ),
+  Full:    (props) => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" {...props}>
+      <path d="M8 3H3v5M16 3h5v5M3 16v5h5M16 21h5v-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+    </svg>
+  ),
+  Restart: (props) => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" {...props}>
+      <path d="M3 4v6h6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+      <path d="M21 20a9 9 0 1 1-3-13.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+    </svg>
+  ),
+};
 
+// Speech-to-text using Web Speech API (Chrome)
+function makeRecognizer(onText) {
+  const SR = typeof window !== 'undefined'
+    ? (window.SpeechRecognition || window.webkitSpeechRecognition)
+    : null;
+  if (!SR) return null;
+  const rec = new SR();
+  rec.lang = 'en-US';
+  rec.continuous = true;
+  rec.interimResults = false;
+  rec.onresult = (e) => {
+    const i = e.results.length - 1;
+    const txt = e.results[i]?.[0]?.transcript || '';
+    if (txt.trim()) onText(txt.trim());
+  };
+  rec.onerror = () => {}; // swallow errors; we surface status elsewhere
+  return rec;
+}
+
+function PageInner() {
+  const sp = useSearchParams();
+  const autostart = useMemo(() => (sp?.get('autostart') ?? '1') === '1', [sp]);
+  const layoutCompact = useMemo(() => (sp?.get('layout') ?? 'compact') === 'compact', [sp]);
+  const videoFirst = useMemo(() => (sp?.get('videoFirst') ?? '1') === '1', [sp]);
+
+  const containerRef = useRef(null);
   const videoRef = useRef(null);
-  const avatarRef = useRef(null); // StreamingAvatar instance
+  const avatarRef = useRef(null);
+  const recRef = useRef(null); // SpeechRecognition
 
   const [status, setStatus] = useState('idle'); // idle | connecting | ready | error
   const [error, setError] = useState('');
-  const [logs, setLogs] = useState([]);
-
-  const [retellChatId, setRetellChatId] = useState('');
-  const [messages, setMessages] = useState([]); // {role:'user'|'assistant'|'system', text:string}
+  const [chatId, setChatId] = useState('');
+  const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
 
-  const avatarName = useMemo(() => process.env.NEXT_PUBLIC_HEYGEN_AVATAR_ID || process.env.HEYGEN_AVATAR_ID || 'default', []);
+  const [soundOn, setSoundOn] = useState(true);
+  const [micOn, setMicOn] = useState(true);
+  const [needGesture, setNeedGesture] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
-  const log = useCallback((label, data) => {
-    const line = `[${new Date().toLocaleTimeString()}] ${label} ${data !== undefined ? (typeof data === 'string' ? data : JSON.stringify(data)) : ''}`;
-    setLogs(prev => [...prev.slice(-150), line]);
-    // eslint-disable-next-line no-console
-    console.log('[EMBED]', label, data);
+  const avatarName = process.env.NEXT_PUBLIC_HEYGEN_AVATAR_ID || '';
+
+  const push = useCallback((role, text) => {
+    setMessages((p) => [...p, { role, text }]);
   }, []);
 
-  const pushMessage = useCallback((role, text) => {
-    setMessages(prev => [...prev, { role, text }]);
-  }, []);
-
-  // ---------- RETELL ----------
-  const ensureRetellChat = useCallback(async () => {
-    if (retellChatId) return retellChatId;
-
-    // attempt resume from localStorage
+  // ------- Retell helpers -------
+  const ensureChat = useCallback(async () => {
+    if (chatId) return chatId;
     try {
-      const stored = window.localStorage.getItem(LS_CHAT_KEY);
-      if (stored) {
-        setRetellChatId(stored);
-        log('Retell: resumed chatId from localStorage:', stored);
-        return stored;
+      const s = window.localStorage.getItem(LS_CHAT_KEY);
+      if (s) {
+        setChatId(s);
+        return s;
       }
     } catch {}
-
-    log('Retell: starting chat…');
-    const r = await fetch('/api/retell-chat/start', { method: 'GET', cache: 'no-store' });
-    const text = await r.text();
-    let j = {};
-    try { j = text ? JSON.parse(text) : {}; } catch {}
-    log('Retell start response:', j);
+    const r = await fetch('/api/retell-chat/start', { cache: 'no-store' });
+    const j = await r.json().catch(() => ({}));
     if (!r.ok || !j?.ok || !j?.chatId) {
-      throw new Error(`Failed to start Retell chat: ${j?.error || j?.status || r.status || 'unknown'}`);
+      throw new Error('CHAT_START_FAILED');
     }
-    setRetellChatId(j.chatId);
+    setChatId(j.chatId);
     try { window.localStorage.setItem(LS_CHAT_KEY, j.chatId); } catch {}
     return j.chatId;
-  }, [retellChatId, log]);
+  }, [chatId]);
 
-  const sendToRetell = useCallback(async (chatId, text) => {
-    log('Retell: sending message…', { chatId, text });
+  const send = useCallback(async (id, text) => {
     const r = await fetch('/api/retell-chat/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       cache: 'no-store',
-      body: JSON.stringify({ chatId, text }),
+      body: JSON.stringify({ chatId: id, text }),
     });
-    const bodyText = await r.text();
-    let j = {};
-    try { j = bodyText ? JSON.parse(bodyText) : {}; } catch {}
-    log('Retell send response:', j);
+    const j = await r.json().catch(() => ({}));
     if (!r.ok || !j?.ok) {
-      throw new Error(`Retell send failed: ${j?.status || r.status || j?.error || 'unknown'}`);
+      const err = new Error('SEND_FAILED');
+      err.status = r.status;
+      throw err;
     }
     return j.reply || '';
-  }, [log]);
+  }, []);
 
-  // ---------- HEYGEN (StreamingAvatar) ----------
-  const initHeygen = useCallback(async () => {
+  // ------- HeyGen helpers -------
+  const stopAvatar = useCallback(async () => {
+    try {
+      const a = avatarRef.current;
+      if (a?.stopAvatar) await a.stopAvatar();
+    } catch {}
+    avatarRef.current = null;
+    if (videoRef.current) videoRef.current.srcObject = null;
+  }, []);
+
+  const tryPlay = useCallback(async () => {
+    try {
+      if (!videoRef.current) return;
+      if (soundOn) videoRef.current.muted = false;
+      await videoRef.current.play();
+      setNeedGesture(false);
+    } catch {
+      // Autoplay blocked — show “tap to enable” shim
+      setNeedGesture(true);
+    }
+  }, [soundOn]);
+
+  const begin = useCallback(async () => {
     setStatus('connecting');
     setError('');
-    log('HeyGen: fetching token…');
 
-    const tokenResp = await fetch('/api/heygen-token', { method: 'GET', cache: 'no-store' });
-    const tokenText = await tokenResp.text();
-    let tokenJson = {};
-    try { tokenJson = tokenText ? JSON.parse(tokenText) : {}; } catch {}
-    log('HeyGen token response:', tokenJson);
+    // token
+    const tr = await fetch('/api/heygen-token', { cache: 'no-store' });
+    const tj = await tr.json().catch(() => ({}));
+    const token = tj?.token || tj?.data?.token || tj?.accessToken || '';
+    if (!token) throw new Error('TOKEN');
 
-    const token = tokenJson?.token || tokenJson?.data?.token || tokenJson?.accessToken || '';
-    if (!token) {
-      throw new Error('Missing HeyGen token from /api/heygen-token');
-    }
-
-    log('HeyGen: loading SDK…');
     const sdk = await loadHeygenSdk();
-    if (!sdk) throw new Error('HeyGen SDK failed to load.');
-    const { StreamingAvatar, AvatarQuality, StreamingEvents } = sdk;
-    if (!StreamingAvatar) throw new Error('StreamingAvatar class not found in SDK.');
+    if (!sdk?.StreamingAvatar) throw new Error('SDK');
 
-    const avatar = new StreamingAvatar({ token, debug: true });
+    const { StreamingAvatar, StreamingEvents, AvatarQuality, TaskType } = sdk;
+    const avatar = new StreamingAvatar({ token, debug: false });
     avatarRef.current = avatar;
 
     avatar.on(StreamingEvents.STREAM_READY, (evt) => {
-      log('HeyGen: STREAM_READY.');
-      const mediaStream = evt?.detail;
-      if (videoRef.current && mediaStream instanceof MediaStream) {
-        videoRef.current.srcObject = mediaStream;
-        videoRef.current.muted = true; // required for autoplay
-        videoRef.current.onloadedmetadata = () => {
-          videoRef.current.play().catch((e) => log('Video play() error:', e?.message || e));
-        };
+      const stream = evt?.detail;
+      if (videoRef.current && stream instanceof MediaStream) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.playsInline = true;
+        // try to unmute (play) immediately
+        tryPlay();
+        setStatus('ready');
       }
     });
 
     avatar.on(StreamingEvents.STREAM_DISCONNECTED, () => {
-      log('HeyGen: STREAM_DISCONNECTED.');
       if (videoRef.current) videoRef.current.srcObject = null;
       setStatus('idle');
     });
 
-    // ---- Start session (use avatarName; add language + disableIdleTimeout) ----
-    log('HeyGen: createStartAvatar()…', { avatarName, options: { language: 'en', disableIdleTimeout: true } });
+    await avatar.createStartAvatar({
+      avatarName,
+      quality: AvatarQuality?.High || 'high',
+      welcomeMessage: '',
+    });
 
-    try {
-      const sessionData = await avatar.createStartAvatar({
-        avatarName,                         // <— IMPORTANT: use avatarName for public presets
-        quality: AvatarQuality?.High || 'high',
-        language: 'en',                     // docs: use language code, e.g. 'en'
-        disableIdleTimeout: true,           // keep session alive (you asked for no fast idle)
-        welcomeMessage: ''
-      });
-      log('HeyGen: session started:', sessionData);
-      setStatus('ready');
-    } catch (e) {
-      // If the chosen name is invalid in this environment, try a known working default
-      log('HeyGen createStartAvatar() failed (will try fallback "default"):', e?.message || e);
+    // helper to speak
+    async function speak(text) {
+      if (!text) return;
+      const payload = TaskType
+        ? { text, taskType: TaskType.REPEAT }
+        : { text, taskType: 'REPEAT' };
+      try { await avatar.speak(payload); } catch {}
+    }
+    // store on window for quick manual tests
+    window.__avatarSpeak = speak;
+  }, [avatarName, tryPlay]);
+
+  // Speech recognition
+  const startRec = useCallback(() => {
+    if (recRef.current) return; // already running
+    const rec = makeRecognizer(async (txt) => {
+      push('user', txt);
       try {
-        const sessionData = await avatar.createStartAvatar({
-          avatarName: 'default',
-          quality: AvatarQuality?.High || 'high',
-          language: 'en',
-          disableIdleTimeout: true,
-          welcomeMessage: ''
-        });
-        log('HeyGen: session started with fallback avatar "default":', sessionData);
-        setStatus('ready');
-      } catch (e2) {
-        log('HeyGen fallback also failed:', e2?.message || e2);
-        throw new Error('API request failed while starting avatar (400). Check avatar name / plan / token.');
+        const id = await ensureChat();
+        const reply = await send(id, txt);
+        push('assistant', reply);
+        try { await window.__avatarSpeak?.(reply); } catch {}
+      } catch (err) {
+        push('system', `Message failed${err?.status ? ` (${err.status})` : ''}. Please try again.`);
       }
-    }
-  }, [avatarName, log]);
+    });
+    if (!rec) return; // not supported
+    recRef.current = rec;
+    try { rec.start(); } catch {}
+  }, [ensureChat, send, push]);
 
-  // Speak Retell reply EXACTLY (REPEAT mode)
-  const speak = useCallback(async (text) => {
-    const avatar = avatarRef.current;
-    if (!avatar || !text) return;
+  const stopRec = useCallback(() => {
+    try { recRef.current?.stop?.(); } catch {}
+    recRef.current = null;
+  }, []);
 
-    const sdk = await loadHeygenSdk();
-    const { TaskType } = sdk || {};
-    const payload = TaskType ? { text, taskType: TaskType.REPEAT } : { text, taskType: 'REPEAT' };
-
-    log('HeyGen: speak ->', payload);
-    try {
-      await avatar.speak(payload);
-    } catch (e) {
-      log('HeyGen speak error:', e?.message || e);
-    }
-  }, [log]);
-
-  // Submit handler (text chat)
+  // ------- Submit -------
   const onSubmit = useCallback(async (e) => {
     e?.preventDefault?.();
-    const text = input.trim();
+    const text = (input || '').trim();
     if (!text) return;
-
     setInput('');
-    pushMessage('user', text);
-
+    push('user', text);
     try {
-      const chatId = await ensureRetellChat();
-      const reply = await sendToRetell(chatId, text);
-      const safeReply = (reply || '').toString();
-      pushMessage('assistant', safeReply);
-      await speak(safeReply); // REPEAT mode makes audio == captions
+      const id = await ensureChat();
+      const reply = await send(id, text);
+      push('assistant', reply);
+      try { await window.__avatarSpeak?.(reply); } catch {}
     } catch (err) {
-      const msg = err?.message || 'Send failed';
-      setError(msg);
-      setStatus(s => (s === 'ready' ? s : 'error'));
-      pushMessage('system', `Error: ${msg}`);
-      log('Send error:', msg);
+      push('system', `Message failed${err?.status ? ` (${err.status})` : ''}. Please try again.`);
     }
-  }, [input, ensureRetellChat, sendToRetell, pushMessage, speak, log]);
+  }, [input, ensureChat, send, push]);
 
-  // Autostart + try to resume chatId from LS
+  // ------- Autostart pipeline -------
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
         try {
-          const stored = window.localStorage.getItem(LS_CHAT_KEY);
-          if (stored) setRetellChatId(stored);
+          const s = window.localStorage.getItem(LS_CHAT_KEY);
+          if (s) setChatId(s);
         } catch {}
-
         if (!autostart) return;
-        await initHeygen();
-        if (!cancelled) {
-          await ensureRetellChat();
-        }
+        await begin();
+        if (!cancelled) await ensureChat();
+        if (!cancelled && micOn) startRec();
       } catch (e) {
         if (!cancelled) {
-          const msg = e?.message || 'Startup error';
-          setError(msg);
+          setError(e?.message || 'Startup error');
           setStatus('error');
-          log('Autostart error:', msg);
         }
       }
     })();
-    return () => { cancelled = true; };
-  }, [autostart, initHeygen, ensureRetellChat, log]);
+    return () => { cancelled = true; stopRec(); stopAvatar(); };
+  }, [autostart, begin, ensureChat, stopAvatar, micOn, startRec]);
 
+  // auto-scroll chat
+  const chatEndRef = useRef(null);
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }, [messages.length]);
+
+  // ------- UI handlers -------
+  const onToggleSound = useCallback(async () => {
+    setSoundOn((s) => !s);
+    if (videoRef.current) {
+      videoRef.current.muted = soundOn; // toggle
+      try { await videoRef.current.play(); } catch {}
+    }
+    setNeedGesture(false);
+  }, [soundOn]);
+
+  const onToggleMic = useCallback(() => {
+    setMicOn((m) => !m);
+    if (micOn) stopRec(); else startRec();
+  }, [micOn, startRec, stopRec]);
+
+  const onRestart = useCallback(async () => {
+    try { window.localStorage.removeItem(LS_CHAT_KEY); } catch {}
+    setChatId('');
+    setMessages([]);
+    await stopAvatar();
+    await begin();
+    await ensureChat();
+    if (micOn) startRec();
+  }, [begin, ensureChat, micOn, startRec, stopAvatar]);
+
+  const onFullscreen = useCallback(async () => {
+    const el = containerRef.current;
+    if (!el) return;
+    try {
+      if (!document.fullscreenElement) {
+        await el.requestFullscreen?.();
+        setIsFullscreen(true);
+      } else {
+        await document.exitFullscreen?.();
+        setIsFullscreen(false);
+      }
+    } catch {}
+  }, []);
+
+  const onGestureEnable = useCallback(async () => {
+    setNeedGesture(false);
+    if (!videoRef.current) return;
+    videoRef.current.muted = false;
+    try { await videoRef.current.play(); } catch {}
+  }, []);
+
+  // ------- Layout classes -------
+  const shellClass = [
+    'avatar-shell',
+    layoutCompact ? 'layout-compact' : '',
+    videoFirst ? 'video-first' : ''
+  ].join(' ').trim();
+
+  // ------- Render -------
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: 16, padding: 16 }}>
-      <div style={{ width: PANEL_W, display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <div
-          style={{
-            width: PANEL_W,
-            height: PANEL_H,
-            background: '#000',
-            borderRadius: 8,
-            overflow: 'hidden',
-            position: 'relative',
-          }}
-        >
-          <video
-            ref={videoRef}
-            width={PANEL_W}
-            height={PANEL_H}
-            playsInline
-            autoPlay
-            muted
-            style={{ width: '100%', height: '100%', objectFit: 'cover', background: '#000' }}
-          />
-          {status !== 'ready' && (
-            <div
-              style={{
-                position: 'absolute',
-                inset: 0,
-                display: 'grid',
-                placeItems: 'center',
-                color: '#fff',
-                background: 'rgba(0,0,0,0.35)',
-                fontWeight: 600,
-                textShadow: '0 1px 2px rgba(0,0,0,0.8)',
-              }}
-            >
-              {status === 'idle' && 'Idle'}
-              {status === 'connecting' && 'Connecting…'}
-              {status === 'error' && 'Error'}
-            </div>
-          )}
-        </div>
+    <div
+      ref={containerRef}
+      className={shellClass}
+      style={{
+        width: 'min(480px, 95vw)',
+        height: 'min(720px, calc(100vh - 24px))',
+        display: 'grid',
+        gridTemplateRows: '55% 45%', // video / chat
+        gap: 10,
+        padding: 10,
+        boxSizing: 'border-box',
+        background: '#0f1220',
+        color: '#e9ecf1',
+        borderRadius: 12,
+      }}
+    >
+      {/* Video with controls overlay */}
+      <div style={{ position: 'relative', borderRadius: 12, overflow: 'hidden', background: '#000' }}>
+        <video
+          ref={videoRef}
+          playsInline
+          autoPlay
+          muted={!soundOn}
+          style={{ width: '100%', height: '100%', objectFit: 'cover', background: '#000' }}
+        />
 
-        <div style={{ display: 'flex', gap: 8 }}>
-          <button
-            onClick={initHeygen}
-            disabled={status === 'connecting' || status === 'ready'}
-            style={{
-              flex: 1,
-              padding: '10px 12px',
-              borderRadius: 8,
-              border: '1px solid #ddd',
-              background: status === 'ready' ? '#e8f5e9' : '#f6f6f6',
-              cursor: status === 'ready' ? 'default' : 'pointer',
-              fontWeight: 600,
-            }}
-          >
-            Start
-          </button>
-          <button
-            onClick={async () => {
-              try {
-                const avatar = avatarRef.current;
-                if (avatar?.stopAvatar) await avatar.stopAvatar();
-              } catch {}
-              avatarRef.current = null;
-              if (videoRef.current) videoRef.current.srcObject = null;
-              setStatus('idle');
-            }}
-            disabled={status !== 'ready'}
-            style={{
-              flex: 1,
-              padding: '10px 12px',
-              borderRadius: 8,
-              border: '1px solid #ddd',
-              background: '#fff3f3',
-              cursor: status === 'ready' ? 'pointer' : 'default',
-              fontWeight: 600,
-            }}
-          >
-            Stop
-          </button>
-        </div>
-
-        {error ? (
-          <div
-            style={{
-              background: '#fff5f5',
-              border: '1px solid #ffd7d7',
-              color: '#b00020',
-              borderRadius: 8,
-              padding: 8,
-              fontSize: 12,
-              lineHeight: 1.4,
-            }}
-          >
-            {error}
+        {/* Status veil */}
+        {status !== 'ready' && (
+          <div style={{
+            position: 'absolute', inset: 0, display: 'grid', placeItems: 'center',
+            color: '#fff', background: 'rgba(0,0,0,.35)', fontWeight: 700
+          }}>
+            {status === 'idle' ? 'Idle' : status === 'connecting' ? 'Connecting…' : 'Error'}
           </div>
-        ) : null}
+        )}
 
-        <div
-          style={{
-            fontSize: 12,
-            color: '#666',
-            marginTop: 4,
-            textAlign: 'left',
-            wordBreak: 'break-word',
-          }}
-        >
-          <div><strong>Avatar (env)</strong>: {avatarName || 'N/A'}</div>
-          <div><strong>Retell Chat ID</strong>: {retellChatId || 'N/A'}</div>
-          <div><strong>Status</strong>: {status}</div>
+        {/* “Tap to enable sound” if autoplay blocked */}
+        {needGesture && (
+          <button
+            onClick={onGestureEnable}
+            style={{
+              position: 'absolute', inset: 0, background: 'rgba(0,0,0,.55)',
+              color: '#fff', fontWeight: 700, border: '0', cursor: 'pointer'
+            }}
+          >
+            Tap to enable sound
+          </button>
+        )}
+
+        {/* Controls row */}
+        <div style={{
+          position:'absolute', top:8, right:8, display:'flex', gap:6,
+          background:'rgba(15,18,32,.55)', padding:'6px 8px',
+          border:'1px solid rgba(255,255,255,.12)', borderRadius:10
+        }}>
+          <button
+            title={micOn ? 'Mic on — click to stop listening' : 'Mic off — click to start listening'}
+            onClick={onToggleMic}
+            style={btnStyle}
+          >
+            {micOn ? <Icon.MicOn/> : <Icon.MicOff/>}
+          </button>
+          <button
+            title={soundOn ? 'Mute' : 'Unmute'}
+            onClick={onToggleSound}
+            style={btnStyle}
+          >
+            {soundOn ? <Icon.Volume/> : <Icon.Mute/>}
+          </button>
+          <button title="Restart conversation" onClick={onRestart} style={btnStyle}><Icon.Restart/></button>
+          <button title={isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'} onClick={onFullscreen} style={btnStyle}><Icon.Full/></button>
         </div>
       </div>
 
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateRows: '1fr auto',
-          height: PANEL_H,
-          maxWidth: 640,
-          border: '1px solid #eee',
-          borderRadius: 8,
-          overflow: 'hidden',
-        }}
-      >
-        <div
-          style={{
-            padding: 12,
-            overflowY: 'auto',
-            background: '#fafafa',
-          }}
-        >
+      {/* Chat */}
+      <div style={{
+        borderRadius: 12, overflow: 'hidden', border: '1px solid #1f2430',
+        background: '#0f1220', display: 'grid', gridTemplateRows: '1fr auto'
+      }}>
+        <div style={{ padding: '10px 12px', overflowY: 'auto', fontSize: 14 }}>
           {messages.length === 0 ? (
-            <div style={{ color: '#777', fontSize: 14 }}>
-              Start a conversation. Type a message below—Retell will reply and the avatar will speak it.
+            <div style={{ opacity: .75 }}>
+              Talk to the agent — we’re listening. You can also type below.
             </div>
-          ) : (
-            messages.map((m, i) => (
-              <div
-                key={i}
-                style={{
-                  marginBottom: 10,
-                  display: 'flex',
-                  alignItems: 'flex-start',
-                  gap: 8,
-                }}
-              >
-                <div
-                  style={{
-                    fontWeight: 700,
-                    fontSize: 12,
-                    minWidth: 72,
-                    textTransform: 'capitalize',
-                    color:
-                      m.role === 'user'
-                        ? '#1565c0'
-                        : m.role === 'assistant'
-                        ? '#2e7d32'
-                        : '#8e24aa',
-                  }}
-                >
-                  {m.role}
-                </div>
-                <div style={{ whiteSpace: 'pre-wrap', fontSize: 14 }}>{m.text}</div>
+          ) : messages.map((m,i) => (
+            <div key={i} style={{ marginBottom: 10 }}>
+              <div style={{
+                fontWeight: 700, fontSize: 12,
+                color: m.role==='user' ? '#60a5fa' : m.role==='assistant' ? '#34d399' : '#e879f9'
+              }}>
+                {m.role === 'assistant' ? 'Assistant' : m.role[0].toUpperCase()+m.role.slice(1)}
               </div>
-            ))
-          )}
+              <div style={{ whiteSpace: 'pre-wrap' }}>{m.text}</div>
+            </div>
+          ))}
+          <div ref={chatEndRef} />
         </div>
-
-        <form onSubmit={onSubmit} style={{ display: 'flex', gap: 8, padding: 8, background: '#fff' }}>
+        <form onSubmit={onSubmit} style={{ display: 'flex', gap: 8, padding: 10, borderTop: '1px solid #1f2430' }}>
           <input
             value={input}
-            onChange={e => setInput(e.target.value)}
-            placeholder={status === 'ready' ? 'Type your message…' : 'Click Start to begin…'}
-            disabled={status !== 'ready'}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="Type your message…"
             style={{
-              flex: 1,
-              padding: '10px 12px',
-              borderRadius: 8,
-              border: '1px solid #ddd',
-              outline: 'none',
+              flex: 1, borderRadius: 10, border: '1px solid #2a3142',
+              background: '#12172a', color: '#e9ecf1', padding: '10px 12px', outline: 'none'
             }}
           />
           <button
             type="submit"
-            disabled={status !== 'ready' || !input.trim()}
+            disabled={!input.trim()}
             style={{
-              padding: '10px 14px',
-              borderRadius: 8,
-              border: '1px solid #0b72e7',
-              background: '#0b72e7',
-              color: '#fff',
-              fontWeight: 700,
-              cursor: status === 'ready' && input.trim() ? 'pointer' : 'default',
+              padding: '10px 14px', borderRadius: 10, border: '1px solid #2563eb',
+              background: '#2563eb', color: '#fff', fontWeight: 700,
+              cursor: input.trim() ? 'pointer' : 'default'
             }}
-          >
-            Send
-          </button>
+          >Send</button>
         </form>
       </div>
 
-      {/* Debug panel */}
-      <div style={{ gridColumn: '1 / span 2', border: '1px dashed #ddd', borderRadius: 8, padding: 8 }}>
-        <div style={{ fontWeight: 700, marginBottom: 6 }}>Debug Log</div>
-        <div style={{ maxHeight: 160, overflowY: 'auto', fontFamily: 'monospace', fontSize: 12, whiteSpace: 'pre-wrap' }}>
-          {logs.length === 0 ? 'No logs yet…' : logs.map((l, i) => <div key={i}>{l}</div>)}
+      {error && (
+        <div style={{
+          position: 'absolute', left: 10, right: 10, bottom: 10,
+          background: '#2a1215', border: '1px solid #5c1a1e',
+          color: '#ffd4d6', borderRadius: 10, padding: '8px 10px', fontSize: 12
+        }}>
+          {error}
         </div>
-      </div>
+      )}
     </div>
   );
 }
 
+const btnStyle = {
+  background: 'transparent',
+  border: '1px solid rgba(255,255,255,.12)',
+  color: '#fff',
+  width: 36,
+  height: 32,
+  display: 'grid',
+  placeItems: 'center',
+  borderRadius: 8,
+  cursor: 'pointer'
+};
+
 export default function EmbedPage() {
   return (
-    <Suspense fallback={<div style={{ padding: 16 }}>Loading…</div>}>
-      <EmbedPageInner />
+    <Suspense fallback={<div style={{ padding: 16, color: '#e9ecf1' }}>Loading…</div>}>
+      <PageInner />
     </Suspense>
   );
 }
+
