@@ -1,70 +1,66 @@
 // app/lib/loadHeygenSdk.js
-// Client-only dynamic import of HeyGen Streaming Avatar SDK, with a compatibility
-// wrapper so your existing embed/page.jsx can stay unchanged.
-//
-// What this does:
-// - Keeps your payload as-is first (avatarName)
-// - If the API returns 400, it retries with avatarId
-// - If that still fails, retries with avatarName: "default" (medium quality)
-// - Normalizes language "en" -> "en-US"
-// - Disables HeyGen's idle timeout by default (keeps stream alive longer)
+// Client-only dynamic import of HeyGen Streaming Avatar SDK + tiny start shim.
+// Works with @heygen/streaming-avatar 2.x line.
 
 export async function loadHeygenSdk() {
   if (typeof window === 'undefined') return null;
+
   try {
     const mod = await import('@heygen/streaming-avatar');
-    const Base = mod.default || mod.StreamingAvatar;
-    if (!Base) return null;
+    const StreamingAvatar = mod.default || mod.StreamingAvatar;
+    const { AvatarQuality, StreamingEvents, TaskType } = mod;
 
-    class PatchedStreamingAvatar extends Base {
-      async createStartAvatar(payload = {}) {
-        // 0) Normalize a few things
-        const p0 = { ...payload };
-        if (p0.language && String(p0.language).toLowerCase() === 'en') {
-          p0.language = 'en-US';
-        }
-        if (p0.avatar_name && !p0.avatarName) {
-          p0.avatarName = p0.avatar_name;
-          delete p0.avatar_name;
-        }
-        if (typeof p0.disableIdleTimeout === 'undefined') {
-          p0.disableIdleTimeout = true;
+    // --- Patch createStartAvatar to try avatarId/avatarName & add long idle timeout ---
+    if (StreamingAvatar && !StreamingAvatar.__patchedByInfinity) {
+      const _orig = StreamingAvatar.prototype.createStartAvatar;
+
+      StreamingAvatar.prototype.createStartAvatar = async function (opts = {}) {
+        // pull the env (baked at build)
+        const envName = process.env.NEXT_PUBLIC_HEYGEN_AVATAR_ID || process.env.HEYGEN_AVATAR_ID || '';
+        const envId = envName; // your env holds the "Dexter_..._public" id
+
+        // base options the server likes
+        const base = {
+          quality: (mod.AvatarQuality?.High || 'high'),
+          language: 'en',
+          // keep session alive longer (seconds). Docs allow 30–3600.
+          activityIdleTimeout: 1800,
+          welcomeMessage: '',
+        };
+
+        // ORDERS we try (cover both API shapes without touching your embed code):
+        //  A) avatarId (public ID)  -> preferred for /v1/streaming.new
+        //  B) avatarName (same value) -> some SDK versions map this internally
+        //  C) default fallback (lets us see if token/plan is the issue)
+        const attempts = [
+          { label: 'avatarId',    payload: { ...base, ...(envId ? { avatarId: envId } : {}) } },
+          { label: 'avatarName',  payload: { ...base, ...(envName ? { avatarName: envName } : {}) } },
+          { label: 'default',     payload: { ...base, avatarName: 'default' } },
+        ];
+
+        let lastErr = null;
+        for (const a of attempts) {
+          try {
+            // eslint-disable-next-line no-console
+            console.log('[HeyGen patched] start (%s)', a.label, { avatarId: a.payload.avatarId, avatarName: a.payload.avatarName });
+            const res = await _orig.call(this, a.payload);
+            return res;
+          } catch (e) {
+            lastErr = e;
+            // eslint-disable-next-line no-console
+            console.warn('[HeyGen patched] start failed (%s): %s', a.label, e?.message || e);
+          }
         }
 
-        // 1) Try as-is (avatarName)
-        try {
-          console.log('[HeyGen patched] start (avatarName):', p0.avatarName || p0.avatarId || '(none)');
-          return await super.createStartAvatar(p0);
-        } catch (e1) {
-          console.warn('[HeyGen patched] start failed with avatarName; retry avatarId:', e1?.message || e1);
-        }
+        // everything failed – surface a clearer error for the UI
+        const code = (lastErr && (lastErr.status || lastErr.code)) || 400;
+        throw new Error(`API request failed while starting avatar (${code}). Check avatar id/name, plan, or token.`);
+      };
 
-        // 2) Retry using avatarId (some tenants expect this)
-        try {
-          const name = p0.avatarName || p0.avatarId;
-          const p1 = { ...p0, avatarId: name };
-          delete p1.avatarName;
-          console.log('[HeyGen patched] start (avatarId):', p1.avatarId);
-          return await super.createStartAvatar(p1);
-        } catch (e2) {
-          console.warn('[HeyGen patched] start failed with avatarId; retry default/medium:', e2?.message || e2);
-        }
-
-        // 3) Final fallback to a safe default avatar (medium quality)
-        const p2 = { ...p0, avatarName: 'default' };
-        delete p2.avatarId;
-        if (mod.AvatarQuality) p2.quality = mod.AvatarQuality.Medium || 'medium';
-        console.log('[HeyGen patched] start (fallback "default")');
-        return await super.createStartAvatar(p2);
-      }
+      StreamingAvatar.__patchedByInfinity = true;
     }
 
-    return {
-      StreamingAvatar: PatchedStreamingAvatar,
-      AvatarQuality: mod.AvatarQuality,
-      StreamingEvents: mod.StreamingEvents,
-      TaskType: mod.TaskType,
-    };
+    return { StreamingAvatar, AvatarQuality, StreamingEvents, TaskType };
   } catch (e) {
     console.error('loadHeygenSdk failed:', e);
     return null;
