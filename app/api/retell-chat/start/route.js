@@ -16,15 +16,11 @@ export async function GET() {
 
     if (!apiKey || !agentId) {
       return new Response(
-        JSON.stringify({
-          ok: false,
-          error: 'Missing RETELL_API_KEY or RETELL_CHAT_AGENT_ID',
-        }),
-        { status: 500, headers: { 'Content-Type': 'application/json' } }
+        JSON.stringify({ ok: false, error: 'Missing RETELL_API_KEY or RETELL_CHAT_AGENT_ID' }),
+        { status: 500, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } },
       );
     }
 
-    // Correct chat start endpoint
     const r = await fetch('https://api.retellai.com/create-chat', {
       method: 'POST',
       headers: {
@@ -42,7 +38,7 @@ export async function GET() {
     if (!r.ok) {
       return new Response(
         JSON.stringify({ ok: false, status: r.status, body: j }),
-        { status: r.status, headers: { 'Content-Type': 'application/json' } }
+        { status: r.status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } },
       );
     }
 
@@ -50,12 +46,12 @@ export async function GET() {
 
     return new Response(
       JSON.stringify({ ok: true, chatId, raw: j }),
-      { status: 200, headers: { 'Content-Type': 'application/json' } }
+      { status: 200, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } },
     );
   } catch (e) {
     return new Response(
       JSON.stringify({ ok: false, error: e?.message || 'start failed' }),
-      { status: 500, headers: { 'Content-Type': 'application/json' } }
+      { status: 500, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } },
     );
   }
 }
