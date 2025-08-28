@@ -11,7 +11,7 @@ export async function POST(req) {
     if (!apiKey) {
       return new Response(
         JSON.stringify({ ok: false, error: 'Missing RETELL_API_KEY' }),
-        { status: 500, headers: { 'Content-Type': 'application/json' } }
+        { status: 500, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } },
       );
     }
 
@@ -24,7 +24,7 @@ export async function POST(req) {
     if (!chatId || !text) {
       return new Response(
         JSON.stringify({ ok: false, error: 'Missing chatId or text' }),
-        { status: 400, headers: { 'Content-Type': 'application/json' } }
+        { status: 400, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } },
       );
     }
 
@@ -45,7 +45,7 @@ export async function POST(req) {
     if (!r.ok) {
       return new Response(
         JSON.stringify({ ok: false, status: r.status, body: j }),
-        { status: r.status, headers: { 'Content-Type': 'application/json' } }
+        { status: r.status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } },
       );
     }
 
@@ -63,12 +63,13 @@ export async function POST(req) {
 
     return new Response(
       JSON.stringify({ ok: true, reply, raw: j }),
-      { status: 200, headers: { 'Content-Type': 'application/json' } }
+      { status: 200, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } },
     );
   } catch (e) {
     return new Response(
       JSON.stringify({ ok: false, error: e?.message || 'send failed' }),
-      { status: 500, headers: { 'Content-Type': 'application/json' } }
+      { status: 500, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } },
     );
   }
 }
+
