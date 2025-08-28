@@ -1,46 +1,38 @@
 export const dynamic = 'force-dynamic';
 
-// Returns a session token for HeyGen Streaming Avatar.
-// Strategy:
-// 1) Try the official create_token endpoint.
-// 2) If it fails or returns no token, fall back to returning the API key as the "token"
-//    (SDK accepts it; do NOT keep this long-term).
 export async function GET() {
-  const apiKey = process.env.HEYGEN_API_KEY || '';
-  if (!apiKey) {
-    return Response.json({ ok: false, error: 'Missing HEYGEN_API_KEY' }, { status: 500 });
-  }
-
   try {
+    const apiKey = process.env.HEYGEN_API_KEY || '';
+    if (!apiKey) {
+      return Response.json({ ok: false, error: 'Missing HEYGEN_API_KEY' }, { status: 500 });
+    }
+
+    // Create a short-lived streaming session token
     const r = await fetch('https://api.heygen.com/v1/streaming.create_token', {
       method: 'POST',
       headers: {
         'X-Api-Key': apiKey,
         'Content-Type': 'application/json',
       },
+      // No special fields required; server returns { data: { token } }
       body: JSON.stringify({}),
       cache: 'no-store',
     });
 
-    // Try to parse either way (some errors return text)
-    const text = await r.text();
-    let j = {};
-    try { j = text ? JSON.parse(text) : {}; } catch {}
-
-    const token = j?.data?.token || j?.token || null;
-
-    if (r.ok && token) {
-      return Response.json({ ok: true, token, raw: j }, { status: 200 });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      return Response.json({ ok: false, status: r.status, body: j }, { status: r.status });
     }
 
-    // Fallback: return API key as token (temporary unblock)
-    return Response.json({ ok: true, token: apiKey, fallback: true, raw: j }, { status: 200 });
-
-  } catch (e) {
-    // Fallback on exception
+    const token = j?.data?.token || j?.token || null;
     return Response.json(
-      { ok: true, token: apiKey, fallback: true, error: e?.message || 'token exception' },
-      { status: 200 }
+      { ok: true, token, raw: j },
+      { headers: { 'Cache-Control': 'no-store' } },
+    );
+  } catch (e) {
+    return Response.json(
+      { ok: false, error: e?.message || 'token failed' },
+      { status: 500, headers: { 'Cache-Control': 'no-store' } },
     );
   }
 }
